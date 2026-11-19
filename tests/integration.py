@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import pty
 import select
+import shlex
 import socket
 import struct
 import subprocess
@@ -103,6 +104,8 @@ class Integration(unittest.TestCase):
             kind = socket.SOCK_SEQPACKET if sys.platform.startswith('linux') else socket.SOCK_STREAM
             self.pairs = [socket.socketpair(socket.AF_UNIX,kind) for _ in range(16)]
             extra = ['--test-client-fds', ','.join(str(b.fileno()) for a,b in self.pairs)]
+        if 'fs_' in self._testMethodName:
+            extra += ['--fs-root', str(self.folder)]
         no_flock = 'no_flock' in self._testMethodName
         binary = 'hd485d-test' if self.inherited or no_flock else 'hd485d'
         environment = os.environ.copy()
@@ -122,7 +125,7 @@ class Integration(unittest.TestCase):
             if self.process.poll() is not None:
                 self.log.flush()
                 self.fail((self.folder/'daemon.log').read_text())
-            if (self.inherited and 'hd485d 0.1.1' in (self.folder/'daemon.log').read_text()) or (not self.inherited and self.socket_path.exists()):
+            if (self.inherited and 'hd485d 0.2.1' in (self.folder/'daemon.log').read_text()) or (not self.inherited and self.socket_path.exists()):
                 break
             time.sleep(0.01)
         else:
@@ -175,6 +178,123 @@ class Integration(unittest.TestCase):
         with self.assertRaises(OSError) as context:
             fn(*args)
         self.assertEqual(context.exception.errno, code)
+
+    def fs_records(self, path, stat=False):
+        self.host.call(36 if stat else 33, path.encode())
+        result = bytearray()
+        while True:
+            block = self.host.ready_call(34, struct.pack('<Q', len(result)))
+            self.assertEqual(struct.unpack_from('<Q', block, 1)[0], len(result))
+            result.extend(block[9:])
+            if block[0]: break
+        self.host.call(35)
+        records = []
+        while result:
+            size, mode, length, modified, names, links = struct.unpack_from('<IIQqHH', result)
+            self.assertEqual(size, 24+names+links)
+            records.append((bytes(result[28:28+names]).decode(), mode, length,
+                            bytes(result[28+names:4+size]).decode()))
+            del result[:4+size]
+        return records
+
+    def test_fs_listing_and_boundaries(self):
+        self.host.hello()
+        info = self.host.call(32)
+        self.assertEqual(struct.unpack_from('<HH', info), (1, 7))
+        name = '中文 空格\n' + 'a'*220
+        (self.folder/name).write_bytes(b'abc')
+        (self.folder/'.hidden').write_bytes(b'')
+        (self.folder/'link').symlink_to('/etc')
+        entries = {r[0]: r for r in self.fs_records('/')}
+        self.assertEqual(entries[name][2], 3)
+        self.assertIn('.hidden', entries)
+        self.assertEqual(entries['link'][3], '/etc')
+        for path in ['/../etc', '/link/passwd', '//etc']:
+            with self.assertRaises(OSError): self.host.call(38, path.encode())
+        self.assertEqual(self.fs_records('/'+name, True)[0][0], name)
+        (self.folder/'empty').mkdir()
+        self.assertEqual(self.fs_records('/empty'), [])
+        before = self.folder.stat()
+        self.host.call(33, b'/')
+        (self.folder/'added').touch()
+        # Explicit timestamp change avoids coarse filesystem timestamp resolution.
+        os.utime(self.folder, ns=(before.st_atime_ns, before.st_mtime_ns+2_000_000_000))
+        with self.assertRaises(OSError): self.host.call(34, struct.pack('<Q',0))
+
+    def test_fs_transfer_resume_conflict(self):
+        self.host.hello()
+        data = bytes(range(256))*3
+        begin = struct.pack('<Q',len(data))+hashlib.sha256(data).digest()+b'\0/new.bin'
+        self.assertEqual(self.host.call(37,begin),struct.pack('<Q',0))
+        self.host.call(PUT_DATA,struct.pack('<Q',0)+data[:240])
+        self.host.call(39)
+        self.assertEqual(self.host.call(37,begin),struct.pack('<Q',240))
+        for off in range(240,len(data),240):
+            self.host.call(PUT_DATA,struct.pack('<Q',off)+data[off:off+240])
+        self.host.ready_call(PUT_COMMIT)
+        target = self.folder/'new.bin'
+        self.assertEqual(target.read_bytes(),data)
+        self.assertEqual(target.stat().st_mode & 0o777,0o644)
+        info = self.host.ready_call(38,b'/new.bin')
+        self.assertEqual(info,struct.pack('<Q',len(data))+hashlib.sha256(data).digest())
+        self.assertEqual(self.host.call(GET_DATA,struct.pack('<Q',240))[8:],data[240:480])
+        self.host.call(39)
+        payload = b'replacement'
+        self.host.call(37,struct.pack('<Q',len(payload))+hashlib.sha256(payload).digest()+b'\1/new.bin')
+        self.host.call(PUT_DATA,struct.pack('<Q',0)+payload)
+        target.write_bytes(b'changed by business')
+        with self.assertRaises(OSError): self.host.ready_call(PUT_COMMIT)
+        self.assertEqual(target.read_bytes(),b'changed by business')
+
+    def test_fs_special_permissions_and_bad_hash(self):
+        self.host.hello()
+        os.mkfifo(self.folder/'fifo')
+        with self.assertRaises(OSError): self.host.call(38,b'/fifo')
+        # A rejected FIFO must not block the daemon event loop.
+        self.assertEqual(len(self.host.call(10)),16)
+        locked=self.folder/'locked';locked.mkdir();locked.chmod(0)
+        try:
+            if os.geteuid()!=0:
+                with self.assertRaises(OSError): self.host.call(33,b'/locked')
+        finally: locked.chmod(0o700)
+        (self.folder/'target').write_bytes(b'original')
+        (self.folder/'target').chmod(0o750)
+        data=b'valid replacement'
+        begin=struct.pack('<Q',len(data))+hashlib.sha256(data).digest()+b'\1/target'
+        self.host.call(37,begin)
+        self.host.call(PUT_DATA,struct.pack('<Q',0)+b'x'*len(data))
+        with self.assertRaises(OSError): self.host.ready_call(PUT_COMMIT)
+        self.assertEqual((self.folder/'target').read_bytes(),b'original')
+        self.host.call(39)
+        for temporary in self.folder.glob('.hd485-*'): temporary.unlink()
+        self.host.call(37,begin)
+        self.host.call(PUT_DATA,struct.pack('<Q',0)+data)
+        self.host.ready_call(PUT_COMMIT)
+        self.assertEqual((self.folder/'target').stat().st_mode & 0o777,0o750)
+        self.host.ready_call(38,b'/target')
+        (self.folder/'target').write_bytes(b'changed')
+        with self.assertRaises(OSError): self.host.call(GET_DATA,struct.pack('<Q',0))
+
+    def test_extension_disabled(self):
+        self.host.hello()
+        revision,flags=struct.unpack_from('<HH',self.host.call(32))
+        self.assertEqual((revision,flags),(1,6))
+        with self.assertRaises(OSError): self.host.call(33,b'/')
+        with self.assertRaises(OSError): self.host.call(38,b'/etc/passwd')
+
+    def test_fs_preemption_and_legacy_root(self):
+        self.host.hello()
+        self.host.call(33,b'/')
+        client = self.client()
+        client.call(1,struct.pack('<I',0))
+        client.call(2)
+        self.host.hello()
+        with self.assertRaises(OSError): self.host.call(34,struct.pack('<Q',0))
+        empty = struct.pack('<Q',0)+hashlib.sha256(b'').digest()+b'\0old'
+        self.host.call(PUT_BEGIN,empty)
+        self.host.ready_call(PUT_COMMIT)
+        self.assertTrue((self.folder/'files'/'old').is_file())
+        self.assertFalse((self.folder/'old').exists())
 
     def test_exclusive_and_permissions(self):
         a, b = self.client(), self.client()
@@ -234,13 +354,64 @@ class Integration(unittest.TestCase):
         a.call(2)
         self.assertEqual(struct.unpack('<IIII',a.call(6)),(230400,8,0,1))
 
+    def shell(self, command):
+        out, err = io.BytesIO(), io.BytesIO()
+        code = self.host.execute(command, out, err)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_shell_cwd_persists_relative_quotes_and_cd_minus(self):
+        self.host.hello()
+        target=self.folder/"cwd with ' quote\n"
+        target.mkdir();(target/'child').mkdir()
+        self.assertEqual(self.shell('cd '+shlex.quote(str(target)))[0],0)
+        self.assertEqual(self.shell('pwd')[1],(str(target)+'\n').encode())
+        self.assertEqual(self.shell('printf cwd-ok > marker')[0],0)
+        self.assertEqual((target/'marker').read_bytes(),b'cwd-ok')
+        self.assertEqual(self.shell('cd child')[0],0)
+        self.assertEqual(self.shell('pwd')[1],(str(target/'child')+'\n').encode())
+        self.assertEqual(self.shell('cd -')[1],(str(target)+'\n').encode())
+        self.assertNotEqual(self.shell('cd /hd485-nonexistent-directory')[0],0)
+        self.assertEqual(self.shell('pwd')[1],(str(target)+'\n').encode())
+        link=self.folder/'logical-link';link.symlink_to(target/'child')
+        self.assertEqual(self.shell('cd '+shlex.quote(str(link)))[0],0)
+        self.assertEqual(self.shell('pwd')[1],(str(link)+'\n').encode())
+        self.assertEqual(self.shell('cd ..')[0],0)
+        self.assertEqual(self.shell('pwd')[1],(str(self.folder)+'\n').encode())
+
+    def test_shell_cwd_exit_status_stdout_and_new_session(self):
+        self.host.hello();initial=self.shell('pwd')[1]
+        target=self.folder/'cwd';target.mkdir()
+        code,out,err=self.shell('cd '+shlex.quote(str(target))+"; printf 'hello'; printf 'error' >&2; exit 7")
+        self.assertEqual((code,out,err),(7,b'hello',b'error'))
+        self.assertEqual(self.shell('pwd')[1],(str(target)+'\n').encode())
+        self.assertEqual(self.shell('cd ..; false')[0],1)
+        self.assertEqual(self.shell('pwd')[1],(str(self.folder)+'\n').encode())
+        self.host.hello()
+        self.assertEqual(self.shell('pwd')[1],initial)
+
+    def test_shell_cwd_timeout_cancel_and_preemption(self):
+        self.host.hello();initial=self.shell('pwd')[1]
+        anchor=self.folder/'anchor';anchor.mkdir()
+        other=self.folder/'other';other.mkdir()
+        self.assertEqual(self.shell('cd '+shlex.quote(str(anchor)))[0],0)
+        self.shell('cd '+shlex.quote(str(other))+'; sleep 5')
+        self.assertEqual(self.shell('pwd')[1],(str(anchor)+'\n').encode())
+        self.host.call(EXEC,('cd '+shlex.quote(str(other))+'; sleep 5').encode())
+        self.host.call(4)
+        time.sleep(.7)
+        self.assertEqual(self.shell('pwd')[1],(str(anchor)+'\n').encode())
+        self.host.call(EXEC,('cd '+shlex.quote(str(other))+'; sleep 5').encode())
+        client=self.client();client.call(1,struct.pack('<I',0));client.call(2)
+        self.host.hello();time.sleep(.7)
+        self.assertEqual(self.shell('pwd')[1],initial)
+
     def test_shell_output_and_status(self):
         self.host.hello();out,err=io.BytesIO(),io.BytesIO()
         rc=self.host.execute("printf 'hello'; printf 'error' >&2; exit 7",out,err)
         self.assertEqual((rc,out.getvalue(),err.getvalue()),(7,b'hello',b'error'))
         out,err=io.BytesIO(),io.BytesIO()
         self.assertEqual(self.host.execute('@version',out,err),0)
-        self.assertEqual(out.getvalue(),b'hd485d 0.1.1\n')
+        self.assertEqual(out.getvalue(),b'hd485d 0.2.1\n')
 
     def test_shell_timeout_and_output_cap(self):
         self.host.hello();self.host.call(EXEC,b'sleep 5')

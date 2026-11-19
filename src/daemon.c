@@ -646,14 +646,14 @@ static void usage(void) {
     fprintf(stderr, "hd485d --device PATH --socket PATH --root DIR [--baud 230400] [--mode "
                     "idle|coexist] [--de none|gpio|kernel] [--gpio 35] [--address 1] "
                     "[--response-ms 500] [--allow-shell] [--command-timeout-ms 30000] "
-                    "[--lock-dir /run]\n");
+                    "[--lock-dir /run] [--fs-root DIR]\n");
 }
 static int version_command(const char *args, unsigned char *out, size_t capacity, size_t *length,
                            void *context) {
     (void)context;
     if (*args)
         return 2;
-    const char *text = "hd485d 0.1.1\n";
+    const char *text = "hd485d 0.2.1\n";
     *length = strlen(text);
     if (*length > capacity)
         return 1;
@@ -662,7 +662,7 @@ static int version_command(const char *args, unsigned char *out, size_t capacity
 }
 int main(int argc, char **argv) {
     const char *device = NULL, *sock = "/run/hd485.sock", *root = "/userdata/hd-rs485/files",
-               *backend = "none", *lock_dir = "/run";
+               *backend = "none", *lock_dir = "/run", *fsroot = NULL;
     int gpio = 35, allow = 0, timeout = 30000;
     int inherited = 0;
     server *s = calloc(1, sizeof(*s));
@@ -691,6 +691,8 @@ int main(int argc, char **argv) {
             sock = v;
         else if (!strcmp(k, "--root"))
             root = v;
+        else if (!strcmp(k, "--fs-root"))
+            fsroot = v;
         else if (!strcmp(k, "--de"))
             backend = v;
         else if (!strcmp(k, "--lock-dir"))
@@ -750,6 +752,12 @@ int main(int argc, char **argv) {
         free(s);
         return 1;
     }
+    if (fsroot && maint_fs_init(&s->maint, fsroot)) {
+        perror("filesystem root");
+        maint_close(&s->maint);
+        free(s);
+        return 1;
+    }
     maint_register_command(&s->maint, "version", version_command, NULL);
     if (serial_open(&s->serial, device, backend, gpio, s->idle, lock_dir)) {
         perror("serial");
@@ -782,7 +790,7 @@ int main(int argc, char **argv) {
             goto fail;
         }
     }
-    fprintf(stderr, "hd485d 0.1.1: %s %u 8N1, mode=%s, de=%s, socket=%s\n", device, s->idle.baud,
+    fprintf(stderr, "hd485d 0.2.1: %s %u 8N1, mode=%s, de=%s, socket=%s\n", device, s->idle.baud,
             s->coexist ? "coexist" : "idle", backend, sock);
     while (!quitting) {
         struct pollfd p[CLIENTS + 2];

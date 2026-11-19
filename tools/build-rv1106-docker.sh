@@ -53,6 +53,6 @@ fi
 mkdir -p "$HD485_SOURCE/dist"
 docker cp "$HD485_CONTAINER:$HD485_CONTAINER_TASK/dist/." "$HD485_SOURCE/dist/"
 cp "$HD485_HOST_TASK/build.log" "$HD485_SOURCE/dist/build-rv1106.log"
-(cd "$HD485_SOURCE/dist" && shasum -a 256 -c hd485-rv1106-0.1.1.tar.sha256)
-printf 'Package: %s/dist/hd485-rv1106-0.1.1.tar\n' "$HD485_SOURCE"
+(cd "$HD485_SOURCE/dist" && shasum -a 256 -c hd485-rv1106-0.2.1.tar.sha256)
+printf 'Package: %s/dist/hd485-rv1106-0.2.1.tar\n' "$HD485_SOURCE"
 # Retain exact source snapshot and build log; no automatic deletion of evidence.

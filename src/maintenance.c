@@ -42,14 +42,22 @@ int maint_register_command(maintenance *m, const char *name, maint_handler run, 
 }
 int maint_init(maintenance *m, const char *root, int allow, int timeout) {
     memset(m, 0, sizeof(*m));
-    m->root = m->file = m->dir = m->pipes[0] = m->pipes[1] = -1;
+    m->fsroot = m->root = m->file = m->dir = m->pipes[0] = m->pipes[1] = -1;
+    m->cwd_base = m->cwd_fd = m->cwd_pipe = -1;
     m->exitcode = -1;
     m->allow_shell = allow;
     m->timeout_ms = timeout;
     if (mkdir(root, 0700) < 0 && errno != EEXIST)
         return -1;
     m->root = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    return m->root < 0 ? -1 : 0;
+    if (m->root < 0) return -1;
+    if (maint_cwd_init(m)) {
+        int e = errno;
+        close(m->root); m->root = -1;
+        errno = e;
+        return -1;
+    }
+    return 0;
 }
 void maint_cancel(maintenance *m, int reason) {
     if (m->pid > 0 && m->cmd_state == 1) {
@@ -60,6 +68,8 @@ void maint_cancel(maintenance *m, int reason) {
 }
 void maint_new_session(maintenance *m) {
     maint_cancel(m, 3);
+    maint_cwd_reset(m);
+    maint_fs_close(m);
     file_close(m);
 }
 static int unchanged(maintenance *m) {
@@ -121,6 +131,7 @@ void maint_tick(maintenance *m) {
             m->kill_at = 0;
         }
     }
+    maint_cwd_tick(m);
     if (m->hashing) {
         unsigned char b[16384];
         size_t want = sizeof(b);
@@ -156,7 +167,7 @@ void maint_tick(maintenance *m) {
 static int start_command(maintenance *m, const unsigned char *p, size_t n) {
     if (!n || n > 4096 || memchr(p, 0, n))
         return EINVAL;
-    if (m->pid > 0)
+    if (m->pid > 0 || m->cwd_pipe >= 0)
         return EBUSY;
     if (p[0] == '@') {
         char text[4097];
@@ -189,16 +200,14 @@ static int start_command(maintenance *m, const unsigned char *p, size_t n) {
     }
     if (!m->allow_shell)
         return EACCES;
-    int f[2][2];
-    if (pipe(f[0]))
-        return errno;
-    if (pipe(f[1])) {
-        int e = errno;
-        close(f[0][0]);
-        close(f[0][1]);
-        return e;
-    }
-    for (int i = 0; i < 2; i++) {
+    if (m->cwd_fd < 0) return EBADF;
+    int f[3][2];
+    for (int i = 0; i < 3; i++) {
+        if (pipe(f[i])) {
+            int e = errno;
+            for (int j = 0; j < i; j++) {close(f[j][0]); close(f[j][1]);}
+            return e;
+        }
         fcntl(f[i][0], F_SETFD, FD_CLOEXEC);
         fcntl(f[i][1], F_SETFD, FD_CLOEXEC);
     }
@@ -208,7 +217,7 @@ static int start_command(maintenance *m, const unsigned char *p, size_t n) {
     pid_t pid = fork();
     if (pid < 0) {
         int e = errno;
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < 3; i++) {
             close(f[i][0]);
             close(f[i][1]);
         }
@@ -227,7 +236,19 @@ static int start_command(maintenance *m, const unsigned char *p, size_t n) {
             close(f[i][0]);
             close(f[i][1]);
         }
-        execl("/bin/sh", "sh", "-c", command, (char *)NULL);
+        if (maint_cwd_enter(m)) {perror("working directory"); _exit(126);}
+        close(f[2][0]);
+        if (f[2][1] != 9) {
+            if (dup2(f[2][1], 9) < 0) _exit(126);
+            close(f[2][1]);
+        } else if (fcntl(9, F_SETFD, 0)) _exit(126);
+        /* CWD metadata has its own FD; stdout/stderr and command exit status stay untouched. */
+        const char *wrapper =
+            "if [ -n \"$2\" ]; then OLDPWD=$2; export OLDPWD; else unset OLDPWD; fi; "
+            "__hd485_command=$1; shift 2; "
+            "trap '(command pwd -P) >&9; printf \"\\000%s\\000%s\\000\" \"$PWD\" \"${OLDPWD-}\" >&9' 0; "
+            "eval \"$__hd485_command\"";
+        execl("/bin/sh", "sh", "-c", wrapper, "hd485-shell", command, m->cwd_old, (char *)NULL);
         _exit(127);
     }
     setpgid(pid, pid);
@@ -239,6 +260,10 @@ static int start_command(maintenance *m, const unsigned char *p, size_t n) {
         nonblock(m->pipes[i]);
         m->output_len[i] = 0;
     }
+    close(f[2][1]);
+    m->cwd_pipe = f[2][0];
+    nonblock(m->cwd_pipe);
+    m->cwd_report_len = 0;
     m->pid = m->pgid = pid;
     m->cmd_state = 1;
     m->exitcode = -1;
@@ -248,15 +273,22 @@ static int start_command(maintenance *m, const unsigned char *p, size_t n) {
     return 0;
 }
 /* Resolve each directory component with O_NOFOLLOW, never concatenate a root path. */
-static int parent(maintenance *m, const unsigned char *p, size_t n, char name[256]) {
-    if (!n || n >= 512 || p[0] == '/' || memchr(p, 0, n)) {
+int maint_parent(int root, const unsigned char *p, size_t n, int absolute, char name[256]) {
+    if (absolute && n && p[0] == '/') {
+        p++;
+        n--;
+    } else if (absolute) {
         errno = EINVAL;
         return -1;
     }
-    char path[512];
+    if (!n || n >= (absolute ? 4095u : 512u) || p[0] == '/' || memchr(p, 0, n)) {
+        errno = EINVAL;
+        return -1;
+    }
+    char path[4096];
     memcpy(path, p, n);
     path[n] = 0;
-    int fd = dup(m->root);
+    int fd = dup(root);
     if (fd < 0)
         return -1;
     fcntl(fd, F_SETFD, FD_CLOEXEC);
@@ -298,7 +330,7 @@ static int put_begin(maintenance *m, const unsigned char *p, size_t n, unsigned 
     if (n < 42 || p[40] > 1 || rd64(p) > MAX_FILE)
         return EINVAL;
     file_close(m);
-    m->dir = parent(m, p + 41, n - 41, m->name);
+    m->dir = maint_parent(m->extended ? m->fsroot : m->root, p + 41, n - 41, m->extended, m->name);
     if (m->dir < 0)
         return errno;
     m->size = rd64(p);
@@ -306,7 +338,10 @@ static int put_begin(maintenance *m, const unsigned char *p, size_t n, unsigned 
     m->overwrite = p[40];
     m->download = 0;
     struct stat st;
+    m->target_exists = 0;
     if (fstatat(m->dir, m->name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+        m->target_exists = 1;
+        m->target_snapshot = st;
         if (!S_ISREG(st.st_mode))
             return EINVAL;
         if (!m->overwrite)
@@ -379,7 +414,7 @@ int maint_request(maintenance *m, unsigned op, const unsigned char *p, size_t n,
         out[1] = (unsigned char)m->truncated;
         wr32(out + 2, (uint32_t)m->exitcode);
         wr32(out + 6, (uint32_t)m->output_len[stream]);
-        out[10] = (m->pipes[0] >= 0 || m->pipes[1] >= 0 || m->pid > 0) ? 0 : 1;
+        out[10] = (m->pipes[0] >= 0 || m->pipes[1] >= 0 || m->cwd_pipe >= 0 || m->pid > 0) ? 0 : 1;
         size_t amount = m->output_len[stream] - off;
         if (amount > 237)
             amount = 237;
@@ -387,7 +422,12 @@ int maint_request(maintenance *m, unsigned op, const unsigned char *p, size_t n,
         *len = 11 + amount;
         return 0;
     }
+    case M_FS_PUT:
     case M_PUT_BEGIN: {
+        file_close(m);
+        m->extended = op == M_FS_PUT;
+        if (m->extended && m->fsroot < 0)
+            return ENOTSUP;
         int error = put_begin(m, p, n, out, len);
         if (error)
             file_close(m);
@@ -439,6 +479,14 @@ int maint_request(maintenance *m, unsigned op, const unsigned char *p, size_t n,
         }
         if (fsync(m->file))
             return errno;
+        if (m->extended) {
+            struct stat current;
+            int exists = fstatat(m->dir, m->name, &current, AT_SYMLINK_NOFOLLOW) == 0;
+            if (!exists && errno != ENOENT) return errno;
+            if (exists != m->target_exists ||
+                (exists && !maint_same_stat(&current, &m->target_snapshot))) return ESTALE;
+            if (fchmod(m->file, exists ? (current.st_mode & 0777) : 0644)) return errno;
+        }
         if (m->overwrite) {
             struct stat st;
             if (fstatat(m->dir, m->name, &st, AT_SYMLINK_NOFOLLOW) == 0 && !S_ISREG(st.st_mode))
@@ -456,15 +504,27 @@ int maint_request(maintenance *m, unsigned op, const unsigned char *p, size_t n,
         file_close(m);
         return 0;
     }
+    case M_FS_GET:
     case M_GET_BEGIN: {
+        int extended = op == M_FS_GET;
+        if (extended && m->fsroot < 0) return ENOTSUP;
+        if (extended != m->extended) file_close(m);
+        m->extended = extended;
         if (!n || n >= sizeof(m->getpath) || memchr(p, 0, n))
             return EINVAL;
         if (m->file < 0 || !m->download || strlen(m->getpath) != n || memcmp(m->getpath, p, n)) {
             file_close(m);
-            m->dir = parent(m, p, n, m->name);
+            m->dir = maint_parent(m->extended ? m->fsroot : m->root, p, n, m->extended, m->name);
             if (m->dir < 0)
                 return errno;
-            m->file = openat(m->dir, m->name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+            struct stat candidate;
+            if (fstatat(m->dir, m->name, &candidate, AT_SYMLINK_NOFOLLOW))
+                return errno;
+            if (!S_ISREG(candidate.st_mode)) {
+                file_close(m);
+                return EINVAL;
+            }
+            m->file = openat(m->dir, m->name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
             if (m->file < 0)
                 return errno;
             if (fstat(m->file, &m->snapshot))
@@ -519,8 +579,12 @@ int maint_request(maintenance *m, unsigned op, const unsigned char *p, size_t n,
         wr64(out + 8, m->offset);
         *len = 16;
         return 0;
+    case M_FILE_CLOSE:
+        if (n) return EINVAL;
+        file_close(m);
+        return 0;
     default:
-        return ENOTSUP;
+        return maint_fs_request(m, op, p, n, out, len);
     }
 }
 void maint_close(maintenance *m) {
@@ -533,6 +597,9 @@ void maint_close(maintenance *m) {
         if (m->pipes[i] >= 0)
             close(m->pipes[i]);
     file_close(m);
+    maint_cwd_close(m);
+    maint_fs_close(m);
+    if (m->fsroot >= 0) close(m->fsroot);
     if (m->root >= 0)
         close(m->root);
 }

@@ -33,7 +33,15 @@ enum {
     M_PUT_COMMIT,
     M_GET_BEGIN,
     M_GET_DATA,
-    M_STATUS
+    M_STATUS,
+    M_FS_INFO = 32,
+    M_FS_LIST,
+    M_FS_READ,
+    M_FS_CLOSE,
+    M_FS_STAT,
+    M_FS_PUT,
+    M_FS_GET,
+    M_FILE_CLOSE
 };
 uint16_t rd16(const void *p);
 uint32_t rd32(const void *p);

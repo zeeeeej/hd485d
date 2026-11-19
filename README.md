@@ -1,8 +1,18 @@
-# HD485 0.1.1
+# HD485 0.2.1
+
+板卡环境、PTY 基线及后续测量要求见 [BOARD_PTY.md](BOARD_PTY.md)。
 
 单 RS485 通道的用户态共享服务。包含 C 服务 `hd485d`、C SDK、Python 主机工具和业务示例；原有业务字节不封装，应用通过 SDK 申请唯一控制权，其他应用可以订阅原始接收流。
 
 ## 当前状态
+
+0.2.1 修复终端 cd：同一维护会话保留工作目录和 OLDPWD，HDTools 0.1.3 根据服务能力显示提示。新会话重置目录，文件浏览根目录和业务串口行为保持兼容。
+
+新增 [HDTools 桌面应用](HDTools/README.md)，支持 macOS／Windows、整个配置文件系统的目录浏览、二进制上传下载及命令终端。板端 0.2.0 增加独立的 `--fs-root`；旧 CLI、SDK 与 `--root` 行为保持兼容。
+
+**2026-11-19 已部署 0.2.1，方式一，启用 `--allow-shell --fs-root /`。同一真实 HDTools 会话内 cd／pwd、相对目录、cd -、重连重置均通过；此前文件传输与业务抢占验证见记录。0.2.0、0.1.1 目录保留用于回退。当前状态见 [部署交接](DEPLOYMENT.md)。**
+
+以下 0.1.1 内容为此前实板验证记录。
 
 已完成 ARM/uClibc 交叉编译，并在 QJY RV1106 V1 板上启动 **0.1.1、方式一（idle）**。板端 SDK 状态查询正常，原相机服务已正常停止，看门狗日志确认关闭。Linux 正式 Socket 路径的 19 项集成测试通过；macOS 历史测试及本次兼容性回归见 [验证记录](VALIDATION.md)。
 
@@ -51,7 +61,7 @@ export CROSS_COMPILE=/实际工具链/bin/arm-rockchip830-linux-uclibcgnueabihf-
 sh tools/build-rv1106.sh
 ```
 
-脚本在本工作区生成 `dist/hd485-rv1106-0.1.1.tar` 及 SHA-256 校验文件，不执行部署。包中包含服务、示例、SDK 静态库和头文件、配置与运行脚本。包使用普通 tar，不依赖板端 gzip。
+脚本在本工作区生成 `dist/hd485-rv1106-0.2.1.tar` 及 SHA-256 校验文件，不执行部署。包中包含服务、示例、SDK 静态库和头文件、配置与运行脚本。包使用普通 tar，不依赖板端 gzip。
 
 在 Mac 上复用 `camera_app` 的现有 Docker 环境时，可使用隔离快照入口，无需把本工作区挂载到容器，也不会覆盖容器中的另一份 camera_app：
 
@@ -72,6 +82,8 @@ sh tools/build-rv1106-docker.sh
 
 ```sh
 sh tools/run-rv1106.sh --allow-shell
+# HDTools 浏览整个设备文件系统：
+sh tools/run-rv1106.sh --allow-shell --fs-root /
 # 或显式启用由主机保证时机的共存模式：
 sh tools/run-rv1106.sh --mode coexist --allow-shell
 ```
