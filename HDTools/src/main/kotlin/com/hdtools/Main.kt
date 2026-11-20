@@ -87,7 +87,7 @@ private fun preview(output: String)=runBlocking {
                 Text("HDTools",fontSize=20.sp,color=MaterialTheme.colorScheme.primary)
                 Text("485 设备文件与命令终端",fontSize=13.sp)
                 Spacer(Modifier.weight(1f))
-                Text(if(c.demo) "演示模式" else "v0.2.0 · H485",color=Color(0xff697586))
+                Text(if(c.demo) "演示模式" else "v0.2.2 · H485",color=Color(0xff697586))
                 Text(if(c.connected) "● 已连接" else "○ 未连接",color=if(c.connected)Color(0xff25805e) else Color.Gray)
             }
             Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(7.dp)) {
@@ -103,7 +103,7 @@ private fun preview(output: String)=runBlocking {
                 Field("地址",c.address,{c.address=it},Modifier.width(90.dp),idle&&!c.connected)
                 SmallButton(if(c.connected) "断开" else "连接",idle) {if(c.connected)c.disconnect() else c.connect()}
             }
-            SerialModeRow(c.serialState,c::cancelRead)
+            SerialModeRow(c)
             Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(7.dp)) {
                 Field("设备路径",destination,{destination=it},Modifier.weight(1f),files)
                 SmallButton("前往",files) {c.navigate(destination)}
@@ -194,29 +194,59 @@ private fun preview(output: String)=runBlocking {
     }
 }
 
-@Composable internal fun SerialModeRow(state: SerialState,cancelRead: ()->Unit) {
-    var remaining by remember(state) {mutableStateOf(0L)}
-    LaunchedEffect(state) {
-        if(state.mode==SerialMode.READING || state.mode==SerialMode.TURNAROUND) {
-            do {
-                remaining=(state.deadlineNanos-System.nanoTime()).coerceAtLeast(0)
-                delay(50)
-            } while(remaining>0)
+@Composable internal fun SerialModeRow(c: Controller) {
+    var traffic by remember(c) {mutableStateOf(c.serialMonitor.traffic())}
+    var now by remember {mutableStateOf(System.nanoTime())}
+    var stabilityInput by remember(c.stabilityMs) {mutableStateOf(c.stabilityMs.toString())}
+    LaunchedEffect(c) {
+        var nextTraffic=0L
+        while(true) {
+            now=System.nanoTime()
+            if(now>=nextTraffic) {traffic=c.serialMonitor.traffic();nextTraffic=now+100_000_000L}
+            delay(50)
         }
     }
+    val state=c.serialState // Controls follow live state, never the display delay.
+    // Read the Compose clock unconditionally, including while switching/idle.
+    val display=c.serialMonitor.display(now)
     val reading=state.mode==SerialMode.READING
+    val closed=state.mode==SerialMode.CLOSED
+    val switching=!closed && display.switching
     val color=when(state.mode) {
         SerialMode.READING -> Color(0xff99620a)
         SerialMode.WRITING -> Color(0xff245a93)
         SerialMode.IDLE -> Color(0xff25805e)
         else -> Color(0xff697586)
     }
-    Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(12.dp)) {
-        Text("串口模式：${state.mode.label}",color=color,fontSize=12.sp)
-        if(reading) {
-            Text(if(state.cancelling) "正在取消读取…" else "第 ${state.attempt}/3 次 · 剩余 ${String.format("%.1f",remaining/1e9)} 秒 · 禁止写入",fontSize=11.sp,color=color)
+    Column(verticalArrangement=Arrangement.spacedBy(4.dp)) {
+        Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(10.dp)) {
+            Row(Modifier.width(260.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+                Text("串口模式：",fontSize=12.sp)
+                when {
+                    closed -> Text(SerialMode.CLOSED.label,color=color,fontSize=12.sp)
+                    state.cancelling -> Text("正在取消读取…",color=color,fontSize=12.sp)
+                    switching -> {
+                        Box(Modifier.size(8.dp).background(Color(0xffd23e3e).copy(alpha=if(display.redLit)1f else .18f),androidx.compose.foundation.shape.CircleShape))
+                        Box(Modifier.size(8.dp).background(Color(0xff25805e).copy(alpha=if(display.redLit).18f else 1f),androidx.compose.foundation.shape.CircleShape))
+                        Text("状态切换中",fontSize=12.sp,color=Color(0xff697586))
+                    }
+                    else -> Text(display.state.mode.label,color=color,fontSize=12.sp)
+                }
+            }
+            Text("RX: ${String.format(java.util.Locale.US,"%,d",traffic.rx)} B",Modifier.width(210.dp),fontFamily=FontFamily.Monospace,fontSize=12.sp,maxLines=1)
+            Text("TX: ${String.format(java.util.Locale.US,"%,d",traffic.tx)} B",Modifier.width(210.dp),fontFamily=FontFamily.Monospace,fontSize=12.sp,maxLines=1)
+            SmallButton("清零") {c.clearTraffic();traffic=c.serialMonitor.traffic()}
+            Spacer(Modifier.weight(1f))
+            SmallButton("取消读取",reading&&!state.cancelling,c::cancelRead)
         }
-        Spacer(Modifier.weight(1f))
-        SmallButton("取消读取",reading&&!state.cancelling,cancelRead)
+        Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(10.dp)) {
+            Field("稳定时间(ms)",stabilityInput,{stabilityInput=it},Modifier.width(190.dp))
+            SmallButton("应用") {c.setStability(stabilityInput)}
+            if(c.stabilityError.isNotEmpty())Text(c.stabilityError,color=Color(0xffc53636),fontSize=11.sp)
+            else if(reading && !switching && !state.cancelling) {
+                val remaining=(state.deadlineNanos-now).coerceAtLeast(0)
+                Text("第 ${state.attempt}/3 次 · 剩余 ${String.format("%.1f",remaining/1e9)} 秒 · 禁止写入",fontSize=11.sp,color=color)
+            }
+        }
     }
 }

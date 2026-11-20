@@ -46,22 +46,36 @@ internal interface WireIO: Closeable {
     fun write(bytes: ByteArray)
     fun read(): ByteArray
 }
-internal class SerialIO(path: String, private val baud: Int): WireIO {
-    private val port = SerialPort.getCommPort(path)
-    init {
-        require(baud in listOf(1200,2400,4800,9600,19200,38400,57600,115200,230400,460800,921600))
-        port.setComPortParameters(baud,8,SerialPort.ONE_STOP_BIT,SerialPort.NO_PARITY)
-        port.setFlowControl(SerialPort.FLOW_CONTROL_DISABLED)
-        port.setComPortTimeouts(SerialPort.TIMEOUT_NONBLOCKING,0,0)
-        check(port.openPort()) {"无法打开串口，请检查权限及占用：$path"}
-        port.flushIOBuffers()
+internal interface SerialDriver: Closeable {
+    val isOpen: Boolean
+    fun write(bytes: ByteArray, offset: Int): Int
+    fun read(bytes: ByteArray): Int
+}
+private fun openDriver(path: String, baud: Int): SerialDriver {
+    require(baud in listOf(1200,2400,4800,9600,19200,38400,57600,115200,230400,460800,921600))
+    val port=SerialPort.getCommPort(path)
+    port.setComPortParameters(baud,8,SerialPort.ONE_STOP_BIT,SerialPort.NO_PARITY)
+    port.setFlowControl(SerialPort.FLOW_CONTROL_DISABLED)
+    port.setComPortTimeouts(SerialPort.TIMEOUT_NONBLOCKING,0,0)
+    check(port.openPort()) {"无法打开串口，请检查权限及占用：$path"}
+    try {port.flushIOBuffers()} catch(e:Exception) {port.closePort();throw e}
+    return object: SerialDriver {
+        override val isOpen get()=port.isOpen
+        override fun write(bytes: ByteArray,offset: Int)=port.writeBytes(bytes,bytes.size-offset,offset)
+        override fun read(bytes: ByteArray)=port.readBytes(bytes,bytes.size)
+        override fun close() {port.closePort()}
     }
+}
+internal class SerialIO(private val driver: SerialDriver, private val baud: Int,
+                        val traffic: TrafficCounters=TrafficCounters()): WireIO {
+    constructor(path: String,baud: Int): this(openDriver(path,baud),baud)
     override fun write(bytes: ByteArray) {
         var offset=0
         val deadline=System.nanoTime()+maxOf(5000L,bytes.size*12000L/baud+2000)*1_000_000L
         while(offset<bytes.size) {
-            check(port.isOpen) {"串口已断开"}
-            val count=port.writeBytes(bytes,bytes.size-offset,offset)
+            check(driver.isOpen) {"串口已断开"}
+            val count=driver.write(bytes,offset)
+            traffic.sent(count) // Include successful partial writes even when this request fails.
             check(count>=0 && System.nanoTime()<deadline) {"串口写入失败或超时"}
             offset+=count
             if(count==0) Thread.sleep(2)
@@ -69,11 +83,12 @@ internal class SerialIO(path: String, private val baud: Int): WireIO {
     }
     override fun read(): ByteArray {
         val bytes=ByteArray(4096)
-        val count=port.readBytes(bytes,bytes.size)
-        check(count>=0 && port.isOpen) {"串口已断开"}
+        val count=driver.read(bytes)
+        traffic.received(count)
+        check(count>=0 && driver.isOpen) {"串口已断开"}
         return bytes.copyOf(count)
     }
-    override fun close() { port.closePort() }
+    override fun close() { driver.close() }
 }
 internal class ConnectionLost(message: String, cause: Throwable?=null): Exception(message,cause)
 internal class DeviceError(val errno: Int): Exception("设备错误 $errno："+when(errno) {

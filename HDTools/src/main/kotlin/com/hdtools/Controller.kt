@@ -28,6 +28,11 @@ internal class Controller(private val scope: CoroutineScope,val demo: Boolean=fa
     var pty by mutableStateOf<PtyConnection?>(null);private set
     var confirmation by mutableStateOf<Confirmation?>(null)
     var serialState by mutableStateOf(SerialState(SerialMode.CLOSED));private set
+    val serialMonitor=SerialMonitor()
+    var stabilityMs by mutableStateOf(500L);private set
+    var stabilityError by mutableStateOf("");private set
+    private val preferenceGuard=Any()
+    private var preferenceSave: Job?=null
     private var serialSession: Session?=null
     private var remote: Device?=null
     private var work: Job?=null
@@ -36,8 +41,28 @@ internal class Controller(private val scope: CoroutineScope,val demo: Boolean=fa
         if(!demo && preferences.isFile) runCatching {
             val p=Properties();preferences.inputStream().use {p.load(it)}
             port=p.getProperty("port","");baud=p.getProperty("baud","230400");address=p.getProperty("address","1")
+            stabilityMs=p.getProperty("stabilityMs")?.toLongOrNull()?.takeIf {it in 100..5000} ?: 500L
+            serialMonitor.setStability(stabilityMs)
         }
     }
+    private fun savePreferences() = synchronized(preferenceGuard) {
+        if(demo)return@synchronized
+        preferences.parentFile.mkdirs()
+        val p=Properties()
+        p.setProperty("port",port.trim());p.setProperty("baud",baud);p.setProperty("address",address)
+        p.setProperty("stabilityMs",stabilityMs.toString())
+        preferences.outputStream().use {p.store(it,"HDTools connection")}
+    }
+    fun setStability(text: String) {
+        val value=text.toLongOrNull()
+        if(value==null || value !in 100..5000) {stabilityError="请输入 100～5000 ms";return}
+        stabilityMs=value;serialMonitor.setStability(value);stabilityError=""
+        preferenceSave=scope.launch {
+            runCatching {withContext(Dispatchers.IO) {savePreferences()}}
+                .onFailure {stabilityError="设置已应用，保存失败：${it.message}"}
+        }
+    }
+    fun clearTraffic() {serialMonitor.clearTraffic()}
     private fun append(text: String) {terminal=(terminal+text).takeLast(256*1024)}
     fun clearTerminal() {terminal=""}
     private fun task(label: String,body: suspend ()->Unit) {
@@ -77,17 +102,18 @@ internal class Controller(private val scope: CoroutineScope,val demo: Boolean=fa
         val rate=baud.toInt();val addr=address.toInt();require(addr in 1..65535)
         val device=withContext(Dispatchers.IO) {
             if(demo) DemoDevice() else {
-                val wire=Session(SerialIO(port.trim(),rate),addr,baud=rate,onState={serialState=it})
+                val io=SerialIO(port.trim(),rate)
+                val token=serialMonitor.opened(io.traffic)
+                serialState=SerialState(SerialMode.IDLE)
+                val wire=Session(io,addr,baud=rate,onState={if(serialMonitor.update(token,it))serialState=it})
                 serialSession=wire
                 try {RemoteDevice(wire)} catch(e:Exception) {wire.close();throw e}
             }
         }
         remote=device;capabilities=device.capabilities;connected=true
-        if(demo) serialState=SerialState(SerialMode.IDLE)
+        if(demo) {serialMonitor.opened(TrafficCounters());serialState=SerialState(SerialMode.IDLE)}
         if(!demo) withContext(Dispatchers.IO) {
-            preferences.parentFile.mkdirs()
-            val p=Properties();p.setProperty("port",port.trim());p.setProperty("baud",baud);p.setProperty("address",address)
-            runCatching {preferences.outputStream().use {p.store(it,"HDTools connection")}}
+            runCatching {savePreferences()}
         }
         append("已连接 H485 · ${if(demo) "演示设备" else port}\n")
         if(device.capabilities.files) load("/")
@@ -147,10 +173,11 @@ internal class Controller(private val scope: CoroutineScope,val demo: Boolean=fa
     }
     fun cancel() {pty?.close();remote?.cancelled?.set(true);status="正在取消任务…"}
     suspend fun shutdown() {
+        preferenceSave?.join()
         pty?.close();remote?.cancelled?.set(true);serialSession?.cancelRead();work?.join()
         withContext(Dispatchers.IO) {remote?.close()}
         remote=null;serialSession=null;connected=false;capabilities=null;entries=emptyList();selected=null;confirmation=null;pty=null
-        serialState=SerialState(SerialMode.CLOSED)
+        serialMonitor.closed();serialState=SerialState(SerialMode.CLOSED)
         status="串口已关闭"
     }
     fun disconnect() {scope.launch {shutdown()}}

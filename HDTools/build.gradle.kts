@@ -4,7 +4,7 @@ plugins {
     id("org.jetbrains.compose") version "1.9.3"
     id("org.jetbrains.kotlin.plugin.compose") version "2.2.21"
 }
-version = "0.2.0"
+version = "0.2.2"
 kotlin { jvmToolchain(17) }
 dependencies {
     implementation("org.jetbrains.jediterm:jediterm-ui:3.72")
@@ -23,7 +23,7 @@ compose.desktop {
             packageName = "HDTools"
             packageVersion = project.version.toString()
             modules("jdk.unsupported", "java.management")
-            macOS { bundleID = "com.hdtools.desktop"; packageVersion = "1.2.0" }
+            macOS { bundleID = "com.hdtools.desktop"; packageVersion = "1.2.2" }
             windows { menuGroup = "HDTools"; shortcut = true }
         }
     }
