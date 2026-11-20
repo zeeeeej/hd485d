@@ -16,7 +16,7 @@ cmake --install "$HD485_BUILD" --prefix "$HD485_STAGE"
 mkdir -p "$HD485_STAGE/configs" "$HD485_STAGE/tools"
 cp "$HD485_SOURCE/configs/anyka-ttySAK2.env" "$HD485_STAGE/configs/"
 cp "$HD485_SOURCE/tools/run-anyka.sh" "$HD485_SOURCE/tools/hd485ctl.py" "$HD485_STAGE/tools/"
-cp "$HD485_SOURCE/README.md" "$HD485_SOURCE/PROTOCOL.md" "$HD485_SOURCE/BOARD_PTY.md" "$HD485_SOURCE/DEPLOYMENT.md" "$HD485_STAGE/"
+cp "$HD485_SOURCE/README.md" "$HD485_SOURCE/PROTOCOL.md" "$HD485_SOURCE/BOARD_PTY.md" "$HD485_SOURCE/DEPLOYMENT.md" "$HD485_SOURCE/TX_OPTIMIZATION.md" "$HD485_STAGE/"
 "${CROSS_COMPILE}readelf" -h -A -l "$HD485_STAGE/bin/hd485d"
-tar -cf "$HD485_SOURCE/dist/hd485-anyka-0.3.0.tar" -C "$HD485_SOURCE/dist" anyka
-(cd "$HD485_SOURCE/dist" && sha256sum hd485-anyka-0.3.0.tar > hd485-anyka-0.3.0.tar.sha256)
+tar -cf "$HD485_SOURCE/dist/hd485-anyka-0.4.1.tar" -C "$HD485_SOURCE/dist" anyka
+(cd "$HD485_SOURCE/dist" && sha256sum hd485-anyka-0.4.1.tar > hd485-anyka-0.4.1.tar.sha256)

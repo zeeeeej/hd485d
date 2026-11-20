@@ -1,6 +1,6 @@
 # hd485d 架构、状态与数据流
 
-记录日期：2026-11-20。对应当前源码 **hd485d 0.3.0 / HDTools 0.2.0**。
+更新日期：2026-11-20。对应当前源码 **hd485d 0.4.1 / HDTools 0.2.0**。
 以下以已选用的 **方式一 `--mode idle`** 为主，描述源码行为，不代表实时板端状态查询。
 图表使用 Mermaid，可在支持 Mermaid 的 Markdown 阅读器中查看。
 
@@ -19,7 +19,8 @@ flowchart TB
 
     subgraph SERVICE["hd485d 用户态服务"]
         RX["主事件循环：读取 UART"]
-        FAN["接收数据复制分发"]
+        CLASS["流式接收分类<br/>H485 校验 / QJY 载荷保护 / 定长裸流"]
+        FAN["业务接收数据复制分发"]
         SUB["各订阅者独立接收队列"]
         GATE{"维护处理条件<br/>无控制者、无等待申请、无故障"}
         PARSE["H485 协议解析<br/>CRC / 会话 / 请求去重"]
@@ -38,10 +39,11 @@ flowchart TB
     APP["板内业务 App / 监听 App<br/>C SDK"]
 
     HOST -->|"485 接收数据"| UART
-    UART --> RX --> FAN
-    FAN -->|"所有收到的原始字节"| SUB
+    UART --> RX --> CLASS
+    CLASS -->|"业务字节"| FAN
+    FAN -->|"过滤后的业务字节"| SUB
     SUB --> IPC -->|"订阅数据 / 事件 / 请求结果"| APP
-    FAN -->|"同一份接收数据"| GATE
+    CLASS -->|"完整合法 H485 帧，不向订阅者广播"| GATE
     GATE -->|"满足条件才解析"| PARSE --> MAINT
     MAINT --> CMD
     MAINT --> PTY
@@ -64,21 +66,23 @@ Shell、vi、top 则运行在独立子进程中。
 
 ### 接收路径
 
-1. hd485d 从 UART 读取一段数据，增加接收序号，附带当前 epoch。
-2. 将原始数据复制到所有已订阅客户端的独立队列，通过 I485 IPC 交给 SDK。
-3. 同一份数据在满足维护条件时，还会送入 H485 解析器。
+1. hd485d 从 UART 读取数据，先进入流式分类器。
+2. 完整合法 H485 帧仅进入维护路径，不向业务订阅者广播；维护条件不满足时也不泄漏。
+3. 普通业务字节和受保护的业务载荷复制到各订阅者队列，附带业务输出序号和 epoch。
 
-接收是复制广播，不是多个 App 竞争读取 UART。控制者申请成功后自动订阅；其他 App
-可以单独订阅，不影响控制权。UART 读取片段不保证等于完整业务帧，业务 App 需要自行组帧。
+控制者申请成功后自动订阅；只读订阅不影响控制权。业务接收片段仍不保证等于完整帧，
+原业务解析器继续负责组帧。订阅接口不自动回送 hd485d 自身的 TX。
+慢订阅者仍使用独立有界队列，丢失事件可观察。
 
-订阅者收到的是原始 RX 字节，包括主机发送的 H485 二进制维护帧，因此直接使用
-`hd485-example ... listen` 打印可能出现“乱码”。订阅接口不会自动回送 hd485d 自身的
-TX 数据。慢订阅者有独立队列，溢出通过丢失事件报告，避免阻塞其他订阅者。
+RV1106 qjy 配置保护 AA 5A 帧的完整载荷；OTA 通过 owner 提前声明 N 字节原始段，
+避免删除业务数据中恰好出现的 H485。错误/不完整维护候选不能保证属于维护，按原顺序
+回送业务流，保持普通字节语义。详细规则见 PROTOCOL.md 的 0.4.0 小节。
 
 ### 发送路径
 
 - 业务 App：SDK WRITE → owner 权限检查 → 业务发送队列 → 统一发送调度 → UART。
   业务字节不增加 H485 封装；WRITE 成功表示已入队，发送完成另由 TX_DONE 事件报告。
+- 大帧（0.4.1）：SDK TX_BEGIN 声明整帧长度 → TX_DATA 每块 ≤8 KiB → 固定 32 KiB 环形缓冲 → 串口线程连续消费。满缓冲时延迟 DATA 应答，腾出空间后事件唤醒；整帧末尾只 drain/换向一次，BEGIN ticket 收到一个 TX_DONE。App 工作队列也用通知管道唤醒，避免定时 poll 引入额外等待。
 - 维护应答：维护处理结果 → H485 封装及缓存 → 统一发送调度 → UART。
   应答有发送期限，过期不补发。
 - 所有发送共用一个发送线程，一次处理一个任务。发送前切换 DE，写入后等待排空，
@@ -138,7 +142,7 @@ stateDiagram-v2
 | `epoch` | 控制权或串口配置变化的代次 |
 | `tx` | 尚在业务发送队列中的字节数，不包含已提交给发送线程的任务 |
 | `error` | 串口故障状态，0 表示没有记录到故障 |
-| `rx` | UART 接收序号，不是累计接收字节数 |
+| `rx` | 业务接收输出块序号，不是累计接收字节数 |
 
 ## 3. PTY 交互的数据流
 
@@ -204,12 +208,12 @@ sequenceDiagram
 | 职责 | 源码入口 |
 |---|---|
 | 本地 SDK API | [include/hd485.h](include/hd485.h) |
-| IPC 权限、申请与配置 | [src/daemon.c](src/daemon.c)，ipc_request，约第 194 行 |
-| H485 请求与去重 | src/daemon.c，remote_request，约第 447 行 |
-| UART 接收与广播 | src/daemon.c，uart_read，约第 538 行 |
-| 仲裁交接与发送调度 | src/daemon.c，progress，约第 557 行 |
-| 发送线程、方向控制与排空 | [src/serial.c](src/serial.c)，worker，约第 152 行 |
-| 维护任务分发 | [src/maintenance.c](src/maintenance.c)，maint_request，约第 397 行 |
+| IPC 权限、申请与配置 | [src/daemon.c](src/daemon.c)，ipc_request |
+| H485 请求与去重 | src/daemon.c，remote_request |
+| UART 接收与分类 | src/daemon.c，uart_read；src/rx_filter.c，rx_filter_feed |
+| 仲裁交接与发送调度 | src/daemon.c，progress |
+| 发送线程、方向控制与排空 | [src/serial.c](src/serial.c)，worker |
+| 维护任务分发 | [src/maintenance.c](src/maintenance.c)，maint_request |
 | PTY 创建、缓冲与回收 | [src/pty_session.c](src/pty_session.c) |
 | 文件系统扩展 | [src/filesystem.c](src/filesystem.c) |
 | HDTools 请求及串口模式 | [Protocol.kt](HDTools/src/main/kotlin/com/hdtools/Protocol.kt) |
@@ -218,3 +222,16 @@ sequenceDiagram
 协议字段以 [PROTOCOL.md](PROTOCOL.md) 为准；板卡和资源测量见
 [BOARD_PTY.md](BOARD_PTY.md)，部署启动与回退见 [DEPLOYMENT.md](DEPLOYMENT.md)，
 验证记录见 [VALIDATION.md](VALIDATION.md)。
+
+
+## 6. RV1106 业务 App 接入
+
+APP 0.4.52 / UART 1.0.26 的 ttyS3 从机通过 hd485d SDK 接入；ttyS4 使用原串口后端。
+正常状态只订阅；完整业务帧校验通过后取得控制权，再调用原处理器。同步应答等待
+TX_DONE 后释放；广播在处理完成后释放；异步任务复制事务引用，最后一个引用结束才释放。
+OTA 接收许可前声明原始段并持续持有控制权，结束/失败后清理。每个 SDK 句柄由专用
+I/O 线程使用，业务线程通过任务队列和本地接收缓存与它交互。
+
+断链会使在途事务失败并清空接收组帧状态；重连重新核验能力和订阅。连接代次禁止旧
+异步回调向新连接发送结果，不重放未知是否执行的命令，不自动改为直开 ttyS3。
+接入方式和实机记录见 [RV1106_INTEGRATION.md](RV1106_INTEGRATION.md)。

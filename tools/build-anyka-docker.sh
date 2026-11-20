@@ -37,7 +37,7 @@ printf 'Host evidence: %s\nContainer snapshot: %s\n' "$HD485_HOST_TASK" "$HD485_
 # Explicit source allowlist: no build caches, external SDK source or credentials.
 COPYFILE_DISABLE=1 tar -cf "$HD485_HOST_TASK/source.tar" -C "$HD485_SOURCE" \
     CMakeLists.txt cmake include src examples tests configs tools \
-    README.md PROTOCOL.md VALIDATION.md plan.md BOARD_PTY.md DEPLOYMENT.md
+    README.md PROTOCOL.md VALIDATION.md plan.md BOARD_PTY.md DEPLOYMENT.md TX_OPTIMIZATION.md
 docker cp "$HD485_HOST_TASK/source.tar" "$HD485_CONTAINER:$HD485_CONTAINER_TASK/source.tar"
 docker exec "$HD485_CONTAINER" tar -xf "$HD485_CONTAINER_TASK/source.tar" -C "$HD485_CONTAINER_TASK"
 
@@ -53,6 +53,6 @@ fi
 mkdir -p "$HD485_SOURCE/dist"
 docker cp "$HD485_CONTAINER:$HD485_CONTAINER_TASK/dist/." "$HD485_SOURCE/dist/"
 cp "$HD485_HOST_TASK/build.log" "$HD485_SOURCE/dist/build-anyka.log"
-(cd "$HD485_SOURCE/dist" && shasum -a 256 -c hd485-anyka-0.3.0.tar.sha256)
-printf 'Package: %s/dist/hd485-anyka-0.3.0.tar\n' "$HD485_SOURCE"
+(cd "$HD485_SOURCE/dist" && shasum -a 256 -c hd485-anyka-0.4.1.tar.sha256)
+printf 'Package: %s/dist/hd485-anyka-0.4.1.tar\n' "$HD485_SOURCE"
 # Retain exact source snapshot and build log; no automatic deletion of evidence.

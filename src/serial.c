@@ -1,4 +1,5 @@
 #include "serial.h"
+#include "tx_trace.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -177,24 +178,58 @@ static void *worker(void *v) {
         else if (s->gpio_fd >= 0)
             usleep(100);
         size_t off = 0;
+        unsigned char chunk[HD_MAX];
         int64_t deadline = now_ms() + 2000 + (int64_t)len * 12000 / s->config.baud;
+        tx_trace(s->trace, "worker_start", s->ticket, len);
         while (!err && off < len) {
-            ssize_t n = write(s->fd, s->data + off, len - off);
-            if (n > 0) {
-                off += (size_t)n;
-                continue;
+            /* Cancellation stays disabled while taking/awaiting producer credit. */
+            pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+            pthread_mutex_lock(&s->lock);
+            int64_t idle_deadline = now_ms() + 2000;
+            while (!s->queued && !s->abort_error && !s->stopping) {
+                struct timespec until;
+#ifdef __linux__
+                clock_gettime(CLOCK_MONOTONIC, &until);
+#else
+                clock_gettime(CLOCK_REALTIME, &until);
+#endif
+                until.tv_nsec += 100000000;
+                if (until.tv_nsec >= 1000000000) {++until.tv_sec;until.tv_nsec-=1000000000;}
+                pthread_cond_timedwait(&s->wake, &s->lock, &until);
+                if (now_ms() >= idle_deadline) s->abort_error = ETIMEDOUT;
             }
-            if (n < 0 && errno == EINTR)
-                continue;
-            if (n == 0 || (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
-                struct pollfd p = {s->fd, POLLOUT, 0};
-                poll(&p, 1, 10);
-                if (now_ms() > deadline)
-                    err = ETIMEDOUT;
-                continue;
+            if (s->abort_error || s->stopping) err = s->abort_error ? s->abort_error : ECANCELED;
+            size_t count = s->queued < sizeof(chunk) ? s->queued : sizeof(chunk);
+            size_t first = HD_TX_RING - s->head;
+            if (first > count) first = count;
+            memcpy(chunk, s->data + s->head, first);
+            memcpy(chunk + first, s->data, count - first);
+            s->head = (s->head + count) % HD_TX_RING;
+            s->queued -= count;
+            pthread_mutex_unlock(&s->lock);
+            (void)write(s->notify[1], "c", 1);
+            pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+            size_t pos = 0;
+            while (!err && pos < count) {
+                pthread_mutex_lock(&s->lock);
+                err = s->abort_error;
+                pthread_mutex_unlock(&s->lock);
+                if (err) break;
+                ssize_t n = write(s->fd, chunk + pos, count - pos);
+                if (n > 0) {pos += (size_t)n;continue;}
+                if (n < 0 && errno == EINTR) continue;
+                if (n == 0 || (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
+                    struct pollfd p = {s->fd, POLLOUT, 0};
+                    poll(&p, 1, 10);
+                    if (now_ms() > deadline) err = ETIMEDOUT;
+                    continue;
+                }
+                err = errno;
             }
-            err = errno;
+            off += pos;
+            tx_trace(s->trace, "write", s->ticket, off);
         }
+        tx_trace(s->trace, "drain_begin", s->ticket, off);
         if (!err) {
             int r;
             do {
@@ -203,6 +238,7 @@ static void *worker(void *v) {
             if (r < 0)
                 err = errno;
         }
+        tx_trace(s->trace, "drain_end", s->ticket, off);
         if (!err && s->gpio_fd >= 0 && s->backend!=3)
             usleep(5000);
         if (err)
@@ -216,6 +252,8 @@ static void *worker(void *v) {
         pthread_mutex_lock(&s->lock);
         s->result = err;
         s->ready = 1;
+        tx_trace(s->trace, "ready", s->ticket, len);
+        (void)write(s->notify[1], "d", 1);
         /* Main thread acknowledges completion before another job can start. */
         while (s->ready && !s->stopping)
             pthread_cond_wait(&s->wake, &s->lock);
@@ -275,11 +313,35 @@ int serial_open(serial_port *s, const char *path, const char *backend, int gpio,
                 const char *lock_dir) {
     memset(s, 0, sizeof(*s));
     s->fd = s->gpio_fd = s->lock_fd = -1;
+    s->notify[0] = s->notify[1] = -1;
+    s->trace = getenv("HD485_TX_TRACE") != NULL;
     pthread_mutex_init(&s->lock, NULL);
-    pthread_cond_init(&s->wake, NULL);
+    pthread_condattr_t attributes;
+    pthread_condattr_init(&attributes);
+#ifdef __linux__
+    /* Board NTP/time corrections must not extend a missing-data timeout. */
+    int clock_error = pthread_condattr_setclock(&attributes, CLOCK_MONOTONIC);
+    if (clock_error) {
+        pthread_condattr_destroy(&attributes);
+        pthread_mutex_destroy(&s->lock);
+        errno = clock_error;
+        return -1;
+    }
+#endif
+    int condition_error = pthread_cond_init(&s->wake, &attributes);
+    pthread_condattr_destroy(&attributes);
+    if (condition_error) {
+        pthread_mutex_destroy(&s->lock);
+        errno = condition_error;
+        return -1;
+    }
+    if (pipe(s->notify)) goto fail;
+    for (int i=0;i<2;i++) {
+        if (nonblock(s->notify[i]) || fcntl(s->notify[i], F_SETFD, FD_CLOEXEC)<0) goto fail;
+    }
     s->fd = open(path, O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
     if (s->fd < 0)
-        return -1;
+        goto fail;
     if (lock_device(s, lock_dir) < 0 || ioctl(s->fd, TIOCEXCL) < 0)
         goto fail;
     s->exclusive = 1;
@@ -327,7 +389,8 @@ int serial_submit(serial_port *s, const void *p, size_t n) {
         return -1;
     }
     memcpy(s->data, p, n);
-    s->len = n;
+    s->len = s->accepted = s->queued = n;
+    s->head = 0; s->stream = 0; s->abort_error = 0;
     s->busy = 1;
     s->start = now_ms();
     pthread_cond_signal(&s->wake);
@@ -345,6 +408,41 @@ int serial_result(serial_port *s, int *r) {
     }
     pthread_mutex_unlock(&s->lock);
     return ready;
+}
+int serial_stream_begin(serial_port *s, size_t total, uint32_t ticket) {
+    pthread_mutex_lock(&s->lock);
+    if (s->busy) {pthread_mutex_unlock(&s->lock);return EBUSY;}
+    s->head = s->queued = s->accepted = 0;
+    s->len = total; s->stream = 1; s->abort_error = 0; s->ticket = ticket;
+    s->busy = 1; s->start = now_ms();
+    pthread_cond_signal(&s->wake);
+    pthread_mutex_unlock(&s->lock);
+    return 0;
+}
+int serial_stream_data(serial_port *s, const void *p, size_t n) {
+    pthread_mutex_lock(&s->lock);
+    int e = 0;
+    if (!s->busy || !s->stream || s->ready) e = EPIPE;
+    else if (s->abort_error) e = s->abort_error;
+    else if (!n || n > s->len - s->accepted) e = EMSGSIZE;
+    else if (n > HD_TX_RING - s->queued) e = EAGAIN;
+    else {
+        size_t tail = (s->head + s->queued) % HD_TX_RING;
+        size_t first = HD_TX_RING - tail;
+        if (first > n) first = n;
+        memcpy(s->data + tail,p,first);memcpy(s->data,(const char *)p+first,n-first);
+        s->queued += n;s->accepted += n;pthread_cond_signal(&s->wake);
+    }
+    pthread_mutex_unlock(&s->lock);
+    return e;
+}
+void serial_abort(serial_port *s, int error) {
+    pthread_mutex_lock(&s->lock);
+    if (s->busy && s->stream) {s->abort_error=error;pthread_cond_signal(&s->wake);}
+    pthread_mutex_unlock(&s->lock);
+}
+void serial_notifications(serial_port *s) {
+    char b[128];while (read(s->notify[0],b,sizeof(b))>0) {}
 }
 void serial_close(serial_port *s) {
     if (s->started) {
@@ -375,6 +473,7 @@ void serial_close(serial_port *s) {
         close(s->lock_fd);
         s->lock_fd = -1;
     }
+    for (int i=0;i<2;i++) if(s->notify[i]>=0) {close(s->notify[i]);s->notify[i]=-1;}
     pthread_mutex_destroy(&s->lock);
     pthread_cond_destroy(&s->wake);
 }

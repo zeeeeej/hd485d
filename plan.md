@@ -1,6 +1,8 @@
 # 单 RS485 通道共享服务设计
 
-状态：0.1.1 已完成 ARM 链接构建并部署到 RV1106，部署模式为方式一（idle）。2026-11-19，xpl 已确认终端模式实机验证通过；文件传输、业务交接及方式二仍待专项验证。实现入口见 `README.md`，协议见 `PROTOCOL.md`，测试范围见 `VALIDATION.md`，部署交接与恢复信息见 `DEPLOYMENT.md`。
+当前实施：0.4.0 已实现维护数据过滤及 RV1106 App 事务式接入，验证与部署见 [RV1106_INTEGRATION.md](RV1106_INTEGRATION.md)。下文 0.1.1 内容保留为初版设计历史。
+
+初版状态：0.1.1 已完成 ARM 链接构建并部署到 RV1106，部署模式为方式一（idle）。2026-11-19，xpl 已确认终端模式实机验证通过；文件传输、业务交接及方式二仍待专项验证。实现入口见 `README.md`，协议见 `PROTOCOL.md`，测试范围见 `VALIDATION.md`，部署交接与恢复信息见 `DEPLOYMENT.md`。
 
 ## 实施更新（2026-11-19）
 
@@ -250,3 +252,8 @@ cd /userdata → pwd、相对路径、cd - 和重连重置；旧 0.2.0 保留可
 两板已启动 0.3.0，具体 PID、启动与回退见 DEPLOYMENT.md；内存、文件体积与
 各项实机结果记录于 BOARD_PTY.md、VALIDATION.md。已完成交互、资源采样、20 次
 会话回收、业务抢占及读模式取消验收，并按 xpl 确认保留新版供调试。xpl 于 2026-11-20 确认验证完毕，并授权将 PTY 实现与文档一并提交 Git。
+
+
+## RV1106 TX 优化补充（0.4.1）
+
+采用分段计时、通知管道唤醒、BEGIN/DATA 有界整帧流水发送；保持 8 KiB IPC 上限，使用 32 KiB 环形缓冲，最终排空后才 TX_DONE。新增断线/取消/缺数据超时恢复，保留旧 WRITE 兼容；业务 App 仅修改独立 worktree 的 UART 适配和版本号。实现与验证记录维护在 [TX_OPTIMIZATION.md](TX_OPTIMIZATION.md)。

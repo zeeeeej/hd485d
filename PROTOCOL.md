@@ -30,7 +30,7 @@ CRC32 使用 IEEE 反射多项式 `0xEDB88320`，初值及最终 XOR 均为 `0xF
 
 串口应答载荷最多 256 字节（包含 errno）。主机应在总线上预留完整请求、应答、GPIO 换向和排空时间。设备没有主动推送日志；输出通过 POLL 获取。设备错误地址、未知会话和非请求帧不应答；不支持的操作码在有效会话内返回 ENOTSUP。
 
-解析遇到损坏帧逐字节重新同步；不完整帧在无新字节超过 `2000 ms + 8216 × 12000 / baud` 后清空。维护被禁止时不解析数据。
+解析遇到损坏候选逐字节重新同步，不能确认为维护的数据返回业务流；不完整候选在无新字节超过 `2000 ms + 8216 × 12000 / baud` 后返回业务流。维护被禁止时仍过滤合法 H485 帧，但不执行。QJY 已识别业务载荷按声明长度保护，不因该超时重新解释载荷。
 
 ## 维护操作
 
@@ -67,6 +67,9 @@ EAGAIN 是已完成的“请稍后查询”应答，下一次检查使用新的�
 | 6 GET_CONFIG | 空 | `baud:u32, bits:u32, parity:u32, stops:u32` |
 | 7 SET_CONFIG | 同上 | 空；TX 未排空返回 EBUSY |
 | 8 STATUS | 空 | `mode:u32, owner:u32, epoch:u32, queued:u32, error:u32, rx_sequence:u32` |
+| 12 TX_BEGIN | `total:u32`，1～16 MiB | 空；该请求编号为整帧 ticket |
+| 13 TX_DATA | 1～8192 字节 | 空；有缓冲空间才确认接收 |
+| 14 TX_ABORT | 空 | 空；实际取消完成仍通过 TX_DONE 通知 |
 | 0x70 RX | 服务主动发送 | `sequence:u32, epoch:u32, bytes`，无 errno 前缀 |
 | 0x71 EVENT | 服务主动发送 | `type:u32, a:u32, b:u32`，无 errno 前缀 |
 
@@ -75,7 +78,7 @@ mode：0 idle、1 coexist。owner：0 无控制者，其他值是服务内部连
 | 事件 type | a | b |
 |---|---|---|
 | 1 OWNER | 当前控制者，0 表示无 | epoch |
-| 2 TX_DONE | WRITE 请求编号／SDK ticket | errno，0 为发送成功 |
+| 2 TX_DONE | WRITE 或 TX_BEGIN 请求编号／SDK ticket | errno，0 为发送成功 |
 | 3 RX_LOST | 丢字节数低 32 位 | 丢字节数高 32 位 |
 | 4 CONFIG | epoch | baud |
 | 5 FAULT | errno | 0 |
@@ -209,3 +212,46 @@ Ctrl+C/Ctrl+D 等作为原始输入字节交给终端行规程。需要 HDTools 
 HDTools 取消读取后不发送清理或后续按键，板端由超时回收；重新打开是显式新会话。
 正常“关闭交互终端”发送 CLOSE。运行时可能需要最多约 500 ms 完成进程回收。
 EOF/退出信息与终端提示符无关，不通过识别 Shell 文本决定会话是否结束。
+
+
+## 0.4.0 业务接收过滤与原始接收段
+
+默认 SUBSCRIBE 和 ACQUIRE 自动订阅均只接收业务字节。先分类，再广播：结构、版本、
+长度及 CRC 正确的 H485 帧不进入订阅队列，包含外部地址、旧会话、未知操作码和应答帧。
+维护是否执行仍遵循地址、会话、owner、等待申请和模式检查；隐藏不等于执行。
+不完整候选最多缓存 HD_PACKET 字节，空闲超时为 `2000 + HD_PACKET*12000/baud` ms；
+CRC 错误、非法头或超时未确认字节按顺序作为普通数据输出。接收序号现在按业务输出块递增。
+
+`--rx-profile generic|qjy`：默认 generic；RV1106 配套脚本选择 qjy。
+qjy 识别 AA 5A 和 8 字节业务头，长度不超过 512 KiB 时，保护后续 payload+CRC16：
+流式转发、不检查其中 H485、不缓冲整帧，业务 CRC 由原业务解析器验证。
+已确认长度的业务载荷不会因任意空闲间隔被重新解释；这与原业务解析器的长度语义一致。
+任意未知裸流无法只靠魔数无歧义区分，应通过原始接收段接口声明；不能把 generic 过滤
+外推为对任意二进制业务协议均透明。
+
+新增 I485 IPC（H485 主机协议不变）：
+
+| 操作 | 编号 | 请求 | 成功应答（不含 errno） |
+|---|---:|---|---|
+| CAPABILITIES | 9 | 空 | flags:u32 LE |
+| RX_RAW_BEGIN | 10 | bytes:u64 LE | 空 |
+| RX_RAW_END | 11 | 空 | 空 |
+
+flags：bit0 业务接收过滤、bit1 定长原始接收、bit2 QJY 帧载荷保护。
+SDK 对应 `hd485_get_capabilities`、`hd485_rx_raw_begin`、`hd485_rx_raw_end`。
+BEGIN/END 仅 owner 可调用；bytes 必须非零，已有候选头、未结束业务帧或原始段返回 EBUSY。
+BEGIN 成功后接下来的精确 N 字节全部为业务数据，包括任何看似 H485 的内容，既不剔除也不执行。
+必须在向业务主机发送 OTA 接收许可前声明。收满自动结束；END、RELEASE 或 owner 断开时中止。
+原始段没有独立超时，由业务 OTA 原有超时负责结束，避免慢速合法传输被重新解释为维护命令。
+
+## 0.4.1 整帧发送与事件唤醒
+
+`CAPABILITIES` 新增 bit 3 (`HD485_CAP_STREAM_TX=8`)。老 WRITE 接口保持不变；新版 camera UART 1.0.27 对超过 8192 字节的完整业务帧使用 BEGIN/DATA，旧服务无此能力时回退 WRITE。小帧仍使用 WRITE。
+
+BEGIN 必须由 owner 在无 TX 时调用，声明包含业务头、载荷、CRC 的完整长度。DATA 按顺序追加，累计达到声明长度后自动收尾，不另发 END。接受 DATA 只代表进入有界发送队列，**不代表物理发送完成**。重复 DATA 不具备幂等性；结果未知的 IPC 失败必须断开，禁止重放半帧。
+
+串口 worker 使用固定 32 KiB 环形缓冲及 8 KiB 工作块，服务最多暂存一个 8 KiB 等待信用的 DATA。缓冲满时暂缓该 RPC 应答，其他客户端和 UART 接收仍被服务。空缓冲连续等待 2 秒取消未完成帧；主动 ABORT、owner 断线也取消，清除待发数据并释放 DE。取消/缺数据超时报告 ECANCELED/ETIMEDOUT，允许下一帧继续；真实串口 I/O 故障仍报告 FAULT。未完成流式发送时 RELEASE/WRITE/SET_CONFIG 返回 EBUSY；先 ABORT 并等待 TX_DONE，或等待正常完成后再 RELEASE。
+
+GPIO 后端整帧只置高 DE 一次，只在最终 tcdrain 和原有 guard 后置低 DE、发送一次 TX_DONE。不同 DATA 间不做 drain/换向。生产消费、完成通知使用条件变量和非阻塞通知管道，不使用忙轮询；daemon 原有维护定时 tick 保留，发送完成无需等 tick。硬件/kernel 后端方向行为由其驱动决定。
+
+设置 `HD485_TX_TRACE=1` 可在 daemon/业务进程日志记录单调时钟微秒、ticket、长度和阶段，不记录业务载荷。阶段含 ipc_write/ipc_begin、submit、worker_start、write、drain_begin/end、ready、tx_done；App 另记录 request/accepted/done。默认关闭，性能正式复测关闭，计时定位另开独立运行。

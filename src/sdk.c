@@ -410,3 +410,30 @@ int hd485_next_event(hd485 *h, hd485_event *e) {
     h->ev_count--;
     return 1;
 }
+
+int hd485_get_capabilities(hd485 *h, uint32_t *flags) {
+    unsigned char b[4];size_t n=sizeof(b);
+    if(!flags){errno=EINVAL;return -1;}
+    if(rpc(h,CAPABILITIES,NULL,0,b,&n,h->timeout,NULL))return -1;
+    if(n!=4){errno=EPROTO;return -1;}*flags=rd32(b);return 0;
+}
+int hd485_rx_raw_begin(hd485 *h,uint64_t bytes) {
+    unsigned char b[8];wr64(b,bytes);
+    return rpc(h,RX_RAW_BEGIN,b,sizeof(b),NULL,NULL,h->timeout,NULL);
+}
+int hd485_rx_raw_end(hd485 *h) {
+    return rpc(h,RX_RAW_END,NULL,0,NULL,NULL,h->timeout,NULL);
+}
+
+int hd485_tx_begin(hd485 *h, uint32_t total, uint32_t *ticket) {
+    if (!total || total > 16u*1024u*1024u) {errno=EMSGSIZE;return -1;}
+    unsigned char b[4];wr32(b,total);
+    return rpc(h,TX_BEGIN,b,4,NULL,NULL,h->timeout,ticket);
+}
+int hd485_tx_data(hd485 *h, const void *data, size_t length) {
+    if (!data || !length || length>HD_MAX) {errno=EMSGSIZE;return -1;}
+    return rpc(h,TX_DATA,data,length,NULL,NULL,h->timeout,NULL);
+}
+int hd485_tx_abort(hd485 *h) {
+    return rpc(h,TX_ABORT,NULL,0,NULL,NULL,h->timeout,NULL);
+}

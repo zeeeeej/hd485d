@@ -30,7 +30,21 @@ int hd485_subscribe(hd485 *h);
 int hd485_unsubscribe(hd485 *h);
 /* Success means queued; HD485_TX_DONE contains ticket in a, errno in b. */
 ssize_t hd485_write(hd485 *h, const void *data, size_t length, uint32_t *ticket);
+/* Bounded whole-frame transfer (capability STREAM_TX). 1..16 MiB total.
+ * DATA accepts 1..8192 bytes, waiting for queue credit, not physical completion.
+ * Exactly total bytes completes automatically. BEGIN ticket receives one TX_DONE
+ * after final drain and DE low. Missing data for 2 seconds aborts the frame.
+ * Never retry an ambiguous transport failure: close/reconnect without replay. */
+int hd485_tx_begin(hd485 *h, uint32_t total, uint32_t *ticket);
+int hd485_tx_data(hd485 *h, const void *data, size_t length);
+int hd485_tx_abort(hd485 *h);
 ssize_t hd485_read(hd485 *h, void *data, size_t capacity, uint32_t *sequence, uint32_t *epoch);
+enum { HD485_CAP_FILTERED_RX = 1, HD485_CAP_RAW_RX = 2, HD485_CAP_QJY_RX = 4, HD485_CAP_STREAM_TX = 8 };
+int hd485_get_capabilities(hd485 *h, uint32_t *flags);
+/* Owner only. Declare the exact upcoming OTA byte count before sending its ACK.
+ * Auto ends at count; explicit end aborts, as do release and disconnect. */
+int hd485_rx_raw_begin(hd485 *h, uint64_t bytes);
+int hd485_rx_raw_end(hd485 *h);
 int hd485_get_config(hd485 *h, hd485_config *config);
 int hd485_set_config(hd485 *h, const hd485_config *config);
 int hd485_get_status(hd485 *h, hd485_status *status);

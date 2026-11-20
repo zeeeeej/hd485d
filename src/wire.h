@@ -20,6 +20,12 @@ enum {
     GET_CONFIG,
     SET_CONFIG,
     STATUS,
+    CAPABILITIES,
+    RX_RAW_BEGIN,
+    RX_RAW_END,
+    TX_BEGIN,
+    TX_DATA,
+    TX_ABORT,
     RX = 0x70,
     EVENT = 0x71
 };

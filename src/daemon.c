@@ -1,5 +1,7 @@
 #include "maintenance.h"
 #include "serial.h"
+#include "tx_trace.h"
+#include "rx_filter.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -42,6 +44,7 @@ typedef struct {
 } cached;
 typedef struct {
     serial_port serial;
+    rx_filter filter;
     maintenance maint;
     client clients[CLIENTS];
     int listener, owner, coexist, fault, inflight, active_who;
@@ -50,10 +53,12 @@ typedef struct {
     int hello_valid;
     port_config idle;
     tx *tx_head, *tx_tail;
+    tx *stream_pending;
+    int stream_active;
     size_t tx_bytes;
-    unsigned char remote[HD_PACKET], pending[HD_HEAD + 256];
-    size_t remote_used, pending_len;
-    int64_t remote_last, pending_until;
+    unsigned char pending[HD_HEAD + 256];
+    size_t pending_len;
+    int64_t pending_until;
     unsigned address, response_ms;
     cached cache[16];
     unsigned cache_next;
@@ -65,6 +70,11 @@ static void signal_stop(int s) {
 }
 static void disconnect(server *s, int i) {
     client *c = &s->clients[i];
+    if(s->stream_active && s->active_who==i) {
+        serial_abort(&s->serial,ECANCELED);
+        free(s->stream_pending);s->stream_pending=NULL;
+    }
+    if(s->owner==i)rx_filter_raw_end(&s->filter);
     if (c->fd >= 0)
         close(c->fd);
     c->fd = -1;
@@ -149,7 +159,7 @@ static void event_all(server *s, unsigned code, uint32_t a, uint32_t b) {
             event_one(s, i, code, a, b);
 }
 static void reset_remote(server *s) {
-    s->remote_used = s->pending_len = 0;
+    s->pending_len = 0;
     s->session = s->last_id = 0;
     s->hello_valid = 0;
     memset(s->cache, 0, sizeof(s->cache));
@@ -245,6 +255,11 @@ static void ipc_request(server *s, int i, const unsigned char *f) {
             err = EALREADY;
             break;
         }
+        if (s->stream_active) {
+            err = EBUSY; /* Abort or await whole-frame TX_DONE before release. */
+            break;
+        }
+        rx_filter_raw_end(&s->filter);
         c->release_pending = 1;
         c->release_id = id;
         return;
@@ -260,7 +275,45 @@ static void ipc_request(server *s, int i, const unsigned char *f) {
         else
             c->sub = 0;
         break;
+    case TX_BEGIN:
+        if (s->owner!=i || c->release_pending) err=EPERM;
+        else if (s->fault) err=s->fault;
+        else if (n!=4 || !rd32(p) || rd32(p)>16u*1024u*1024u) err=EINVAL;
+        else if (s->inflight || s->tx_head) err=EBUSY;
+        else {
+            preempt(s);
+            tx_trace(s->serial.trace,"ipc_begin",id,rd32(p));
+            err=serial_stream_begin(&s->serial,rd32(p),id);
+            if (!err) {
+                s->inflight=s->stream_active=1;s->active_who=i;
+                s->active_generation=c->generation;s->active_id=id;
+            }
+        }
+        break;
+    case TX_DATA:
+        if(s->owner!=i || c->release_pending) err=EPERM;
+        else if(!s->stream_active) err=EPIPE;
+        else if(s->stream_pending) err=EBUSY;
+        else {
+            err=serial_stream_data(&s->serial,p,n);
+            if(err==EAGAIN) {
+                tx *t=malloc(sizeof(*t)+n);
+                if(!t) {err=ENOMEM;serial_abort(&s->serial,ECANCELED);break;}
+                t->who=i;t->generation=c->generation;t->id=id;t->len=n;
+                memcpy(t->data,p,n);s->stream_pending=t;
+                return; /* Credit ACK is deferred; daemon keeps serving all clients. */
+            }
+            if(!err)tx_trace(s->serial.trace,"ipc_data",s->active_id,n);
+        }
+        break;
+    case TX_ABORT:
+        if(s->owner!=i) err=EPERM;
+        else if(n) err=EINVAL;
+        else serial_abort(&s->serial,ECANCELED);
+        break;
     case WRITE: {
+        if(s->stream_active) {err=EBUSY;break;}
+        tx_trace(s->serial.trace,"ipc_write",id,n);
         if (s->owner != i || c->release_pending) {
             err = EPERM;
             break;
@@ -334,6 +387,19 @@ static void ipc_request(server *s, int i, const unsigned char *f) {
         }
         break;
     }
+    case CAPABILITIES:
+        if(n)err=EINVAL;
+        else {wr32(out,11u | (s->filter.qjy?4u:0u));len=4;}
+        break;
+    case RX_RAW_BEGIN:
+    case RX_RAW_END:
+        if(s->owner!=i || c->release_pending)err=EPERM;
+        else if(s->fault)err=s->fault;
+        else if(op==RX_RAW_BEGIN) {
+            if(n!=8)err=EINVAL;else err=rx_filter_raw_begin(&s->filter,rd64(p));
+        } else if(n)err=EINVAL;
+        else rx_filter_raw_end(&s->filter);
+        break;
     case STATUS:
         if (n)
             err = EINVAL;
@@ -505,65 +571,47 @@ static void remote_request(server *s, const unsigned char *f) {
         memcpy(c->data, s->pending, c->len);
     }
 }
-static void remote_feed(server *s, const unsigned char *p, size_t n) {
-    if (!maintenance_allowed(s) || waiting(s)) {
-        s->remote_used = 0;
-        return;
-    }
-    s->remote_last = now_ms();
-    while (n--) {
-        if (s->remote_used == sizeof(s->remote)) {
-            memmove(s->remote, s->remote + 1, --s->remote_used);
-        }
-        s->remote[s->remote_used++] = *p++;
-        for (;;) {
-            if (s->remote_used >= 4 && memcmp(s->remote, "H485", 4)) {
-                memmove(s->remote, s->remote + 1, --s->remote_used);
-                continue;
-            }
-            int r = frame_check(s->remote, s->remote_used, "H485");
-            if (r < 0) {
-                memmove(s->remote, s->remote + 1, --s->remote_used);
-                continue;
-            }
-            if (!r)
-                break;
-            size_t size = HD_HEAD + rd32(s->remote + 16);
-            remote_request(s, s->remote);
-            memmove(s->remote, s->remote + size, s->remote_used - size);
-            s->remote_used -= size;
-        }
-    }
+static void filtered_maintenance(void *context,const unsigned char *p,size_t n) {
+    (void)n;remote_request(context,p);
+}
+static void filtered_business(void *context,const unsigned char *p,size_t n) {
+    server *s=context;
+    unsigned char b[HD_PACKET],d[4104];
+    wr32(d,++s->rxseq);wr32(d+4,s->epoch);memcpy(d+8,p,n);
+    size_t len=frame_make(b,"I485",RX,0,0,0,d,n+8);
+    for(int i=0;i<CLIENTS;i++)
+        if(s->clients[i].fd>=0 && s->clients[i].sub)queue_message(s,i,b,len,1);
 }
 static void uart_read(server *s) {
-    unsigned char p[4096], b[HD_PACKET], d[4104];
-    ssize_t n = read(s->serial.fd, p, sizeof(p));
-    if (n < 0) {
-        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
-            fatal_port(s, errno);
-        return;
-    }
-    if (!n)
-        return;
-    wr32(d, ++s->rxseq);
-    wr32(d + 4, s->epoch);
-    memcpy(d + 8, p, (size_t)n);
-    size_t len = frame_make(b, "I485", RX, 0, 0, 0, d, (size_t)n + 8);
-    for (int i = 0; i < CLIENTS; i++)
-        if (s->clients[i].fd >= 0 && s->clients[i].sub)
-            queue_message(s, i, b, len, 1);
-    remote_feed(s, p, (size_t)n);
+    unsigned char p[4096];ssize_t n=read(s->serial.fd,p,sizeof(p));
+    if(n<0) {
+        if(errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR)fatal_port(s,errno);
+    } else if(n>0)rx_filter_feed(&s->filter,p,(size_t)n);
 }
 static void progress(server *s) {
+    rx_filter_tick(&s->filter,2000+(int64_t)HD_PACKET*12000/s->serial.config.baud);
+    if(s->stream_pending) {
+        tx *t=s->stream_pending;
+        int e=serial_stream_data(&s->serial,t->data,t->len);
+        if(e!=EAGAIN) {
+            s->stream_pending=NULL;
+            if(s->clients[t->who].fd>=0 && s->clients[t->who].generation==t->generation)
+                response(s,t->who,TX_DATA,t->id,e,NULL,0);
+            if(!e)tx_trace(s->serial.trace,"ipc_data",s->active_id,t->len);
+            free(t);
+        }
+    }
     int result;
     if (s->inflight && serial_result(&s->serial, &result)) {
         s->inflight = 0;
+        int streamed=s->stream_active;s->stream_active=0;
+        tx_trace(s->serial.trace,"tx_done",s->active_id,(size_t)result);
         if (s->active_who >= 0) {
             client *c = &s->clients[s->active_who];
             if (c->fd >= 0 && c->generation == s->active_generation)
                 event_one(s, s->active_who, 2, s->active_id, (uint32_t)result);
         }
-        if (result)
+        if (result && !(streamed && (result==ECANCELED || result==ETIMEDOUT)))
             fatal_port(s, result);
     }
     if (s->inflight &&
@@ -614,9 +662,6 @@ static void progress(server *s) {
     }
     if (s->pending_len && now_ms() >= s->pending_until)
         s->pending_len = 0;
-    if (s->remote_used &&
-        now_ms() - s->remote_last > 2000 + (int64_t)HD_PACKET * 12000 / s->serial.config.baud)
-        s->remote_used = 0;
     if (!s->inflight && !s->fault) {
         if (s->tx_head) {
             tx *t = s->tx_head;
@@ -627,6 +672,8 @@ static void progress(server *s) {
             s->active_who = t->who;
             s->active_generation = t->generation;
             s->active_id = t->id;
+            s->serial.ticket=t->id;
+            tx_trace(s->serial.trace,"submit",t->id,t->len);
             serial_submit(&s->serial, t->data, t->len);
             s->inflight = 1;
             free(t);
@@ -646,14 +693,14 @@ static void usage(void) {
     fprintf(stderr, "hd485d --device PATH --socket PATH --root DIR [--baud 230400] [--mode "
                     "idle|coexist] [--de none|gpio|gpio-anyka|kernel] [--gpio 35] [--address 1] "
                     "[--response-ms 500] [--allow-shell] [--command-timeout-ms 30000] "
-                    "[--lock-dir /run] [--fs-root DIR] [--allow-pty] [--pty-timeout-ms 20000]\n");
+                    "[--rx-profile generic|qjy] [--lock-dir /run] [--fs-root DIR] [--allow-pty] [--pty-timeout-ms 20000]\n");
 }
 static int version_command(const char *args, unsigned char *out, size_t capacity, size_t *length,
                            void *context) {
     (void)context;
     if (*args)
         return 2;
-    const char *text = "hd485d 0.3.0\n";
+    const char *text = "hd485d 0.4.1\n";
     *length = strlen(text);
     if (*length > capacity)
         return 1;
@@ -672,6 +719,8 @@ int main(int argc, char **argv) {
     s->idle = (port_config){230400, 8, 0, 1};
     s->address = 1;
     s->response_ms = 500;
+    s->filter.context=s;s->filter.on_business=filtered_business;
+    s->filter.on_maintenance=filtered_maintenance;
     for (int i = 0; i < CLIENTS; i++)
         s->clients[i].fd = -1;
     for (int i = 1; i < argc; i++) {
@@ -694,6 +743,10 @@ int main(int argc, char **argv) {
             root = v;
         else if (!strcmp(k, "--fs-root"))
             fsroot = v;
+        else if (!strcmp(k, "--rx-profile")) {
+            if(strcmp(v,"generic") && strcmp(v,"qjy")){usage();free(s);return 2;}
+            s->filter.qjy=!strcmp(v,"qjy");
+        }
         else if (!strcmp(k, "--de"))
             backend = v;
         else if (!strcmp(k, "--lock-dir"))
@@ -796,16 +849,18 @@ int main(int argc, char **argv) {
             goto fail;
         }
     }
-    fprintf(stderr, "hd485d 0.3.0: %s %u 8N1, mode=%s, de=%s, socket=%s\n", device, s->idle.baud,
+    fprintf(stderr, "hd485d 0.4.1: %s %u 8N1, mode=%s, de=%s, socket=%s\n", device, s->idle.baud,
             s->coexist ? "coexist" : "idle", backend, sock);
     while (!quitting) {
-        struct pollfd p[CLIENTS + 2];
+        struct pollfd p[CLIENTS + 3];
         p[0] = (struct pollfd){s->listener, POLLIN, 0};
         p[1] = (struct pollfd){s->fault ? -1 : s->serial.fd, POLLIN, 0};
         for (int i = 0; i < CLIENTS; i++)
             p[i + 2] = (struct pollfd){s->clients[i].fd,
                                        (short)(POLLIN | (s->clients[i].head ? POLLOUT : 0)), 0};
-        int r = poll(p, CLIENTS + 2, 10);
+        p[CLIENTS+2]=(struct pollfd){s->serial.notify[0],POLLIN,0};
+        int r = poll(p, CLIENTS + 3, 10);
+        if(p[CLIENTS+2].revents & POLLIN)serial_notifications(&s->serial);
         if (r < 0 && errno != EINTR) {
             perror("poll");
             break;

@@ -104,6 +104,8 @@ class Integration(unittest.TestCase):
             kind = socket.SOCK_SEQPACKET if sys.platform.startswith('linux') else socket.SOCK_STREAM
             self.pairs = [socket.socketpair(socket.AF_UNIX,kind) for _ in range(16)]
             extra = ['--test-client-fds', ','.join(str(b.fileno()) for a,b in self.pairs)]
+        if 'qjy_' in self._testMethodName:
+            extra += ['--rx-profile','qjy']
         if 'fs_' in self._testMethodName:
             extra += ['--fs-root', str(self.folder)]
         if 'interactive_' in self._testMethodName:
@@ -127,7 +129,7 @@ class Integration(unittest.TestCase):
             if self.process.poll() is not None:
                 self.log.flush()
                 self.fail((self.folder/'daemon.log').read_text())
-            if (self.inherited and 'hd485d 0.3.0' in (self.folder/'daemon.log').read_text()) or (not self.inherited and self.socket_path.exists()):
+            if 'hd485d ' in (self.folder/'daemon.log').read_text() and (self.inherited or self.socket_path.exists()):
                 break
             time.sleep(0.01)
         else:
@@ -413,7 +415,7 @@ class Integration(unittest.TestCase):
         self.assertEqual((rc,out.getvalue(),err.getvalue()),(7,b'hello',b'error'))
         out,err=io.BytesIO(),io.BytesIO()
         self.assertEqual(self.host.execute('@version',out,err),0)
-        self.assertEqual(out.getvalue(),b'hd485d 0.3.0\n')
+        self.assertEqual(out.getvalue(),b'hd485d 0.4.1\n')
 
     def test_shell_timeout_and_output_cap(self):
         self.host.hello();self.host.call(EXEC,b'sleep 5')
@@ -454,13 +456,14 @@ class Integration(unittest.TestCase):
         a=self.client();a.call(1,struct.pack('<I',0))
         self.host.hello();self.host.call(STATUS)
         a.call(8)
-        self.assertIn(b'H485',a.rx)
+        self.assertEqual(a.rx,b'')
         out,err=io.BytesIO(),io.BytesIO()
         self.assertEqual(self.host.execute('printf coexist',out,err),0)
         self.assertEqual(out.getvalue(),b'coexist')
         a.call(5,b'business')
         self.assertEqual(self.serial_read(8),b'business')
 
+    @unittest.skipUnless(hasattr(hashlib, "file_digest"), "host file helper requires Python >=3.11")
     def test_file_upload_download_and_overwrite(self):
         self.host.hello();source=self.folder/'source.bin';source.write_bytes(bytes(range(256))*13)
         digest=self.host.put(source,'remote.bin')
@@ -514,6 +517,7 @@ class Integration(unittest.TestCase):
         self.assertTrue(any(e[0]==3 and e[1]>0 for e in slow.events))
         self.assertLess(len(slow.rx),len(payload)*256)
 
+    @unittest.skipUnless(hasattr(hashlib, "file_digest"), "host file helper requires Python >=3.11")
     def test_download_resume(self):
         self.host.hello();content=b'partial-download'*130
         remote=self.folder/'files/data';remote.write_bytes(content)
@@ -581,6 +585,52 @@ class Integration(unittest.TestCase):
         self.assertEqual(result.returncode,0,result.stderr)
         reader.join(3)
         self.assertEqual(received,[b'SDK'])
+
+    def test_filter_maintenance_and_fragmentation(self):
+        a,b=self.client(),self.client();a.call(3);b.call(3)
+        self.host.hello();self.host.call(STATUS)
+        packet=frame(b'H485',STATUS|0x80,1,self.host.session,self.host.request+1)
+        for byte in packet:self.serial_write(bytes([byte]));time.sleep(.001)
+        time.sleep(.03)
+        for c in (a,b):c.call(8);self.assertEqual(c.rx,b'')
+        bad=bytearray(packet);bad[-1]^=1
+        payload=b'before'+bad+b'after'
+        self.serial_write(payload)
+        for c in (a,b):self.assertEqual(c.received(len(payload)),payload)
+
+    def test_filter_owner_also_hides_maintenance(self):
+        a=self.client();a.call(1,struct.pack('<I',0))
+        packet=frame(b'H485',1,2,0,1,b'12345678')
+        self.serial_write(b'foo'+packet+b'bar')
+        self.assertEqual(a.received(6),b'foobar')
+        a.call(8);self.assertEqual(a.rx,b'')
+
+    def test_filter_partial_timeout(self):
+        a=self.client();a.call(3);self.serial_write(b'H48')
+        self.assertEqual(a.received(3),b'H48')
+        self.serial_write(b'plain');self.assertEqual(a.received(5),b'plain')
+
+    def test_qjy_payload_and_raw_lease(self):
+        a,b=self.client(),self.client();a.call(3);b.call(3)
+        self.assertEqual(struct.unpack('<I',a.call(9))[0],15)
+        h485=frame(b'H485',1,1,0,1,b'12345678')
+        payload=(h485+b'x')*400
+        qjy=b'\xaa\x5a\xee\x01'+struct.pack('<I',len(payload))+payload+b'XX'
+        self.serial_write(qjy)
+        for c in (a,b):self.assertEqual(c.received(len(qjy)),qjy)
+        self.assert_errno(errno.EPERM,a.call,10,struct.pack('<Q',len(payload)))
+        a.call(1,struct.pack('<I',0));a.call(10,struct.pack('<Q',len(payload)))
+        self.serial_write(payload+h485+b'end')
+        for c in (a,b):self.assertEqual(c.received(len(payload)+3),payload+b'end')
+        a.call(11);a.call(2)
+
+    def test_raw_lease_release_and_disconnect(self):
+        a,b=self.client(),self.client();b.call(3)
+        a.call(1,struct.pack('<I',0));a.call(10,struct.pack('<Q',100));a.call(2)
+        packet=frame(b'H485',1,2,0,1,b'12345678')
+        self.serial_write(packet+b'one');self.assertEqual(b.received(3),b'one')
+        a.call(1,struct.pack('<I',0));a.call(10,struct.pack('<Q',100));a.close()
+        time.sleep(.05);self.serial_write(packet+b'two');self.assertEqual(b.received(3),b'two')
 
     def pty_open(self):
         self.host.hello()

@@ -22,4 +22,4 @@ done
 mkdir -p "$HD485_ROOT"
 exec "$HD485_PACKAGE/bin/hd485d" --device "$HD485_DEVICE" --socket "$HD485_SOCKET" \
     --root "$HD485_ROOT" --baud "$HD485_BAUD" --de "$HD485_DE" \
-    --gpio "$HD485_GPIO" --mode "$HD485_MODE" "$@"
+    --gpio "$HD485_GPIO" --mode "$HD485_MODE" --rx-profile "${HD485_RX_PROFILE:-qjy}" "$@"

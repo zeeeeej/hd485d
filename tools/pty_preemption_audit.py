@@ -15,7 +15,7 @@ try:
  print('Old PTY session stopped responding after SDK acquire/release (expected).')
  print(c.command(shlex.quote(a.example)+' '+shlex.quote(a.socket)+' status; cat /proc/sys/kernel/pty/nr'))
  h.hello();h.call(2,b'@version');time.sleep(.1)
- reply=h.call(3,struct.pack('<BI',0,0));assert b'hd485d 0.3.0' in reply[11:]
+ reply=h.call(3,struct.pack('<BI',0,0));assert b'hd485d 0.4.0' in reply[11:]
  print('PREEMPT_AND_EXPLICIT_RECONNECT_OK')
 finally:
  if t and t.thread.is_alive():

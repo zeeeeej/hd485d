@@ -1,0 +1,16 @@
+#!/bin/sh
+# Boot dependency wrapper 0.1.0. Keeps the existing OEM launcher/OTA paths.
+set -eu
+unset LD_PRELOAD HD485_TX_TRACE
+case "${1:-}" in
+    start)
+        /etc/init.d/S21hd485d start
+        exec /oem/usr/bin/S22hd_camera_app2 start;;
+    stop)
+        exec sh /oem/hd485/tools/stop-rv1106-stack.sh --app-only;;
+    restart)
+        sh /oem/hd485/tools/stop-rv1106-stack.sh --app-only
+        /etc/init.d/S21hd485d start
+        exec /oem/usr/bin/S22hd_camera_app2 start;;
+    *) echo "Usage: $0 {start|stop|restart}" >&2; exit 2;;
+esac

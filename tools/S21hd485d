@@ -1,0 +1,76 @@
+#!/bin/sh
+# Service helper 0.1.0. Install as /etc/init.d/S21hd485d on a prepared QJY board.
+set -eu
+SERVICE_PACKAGE=${HD485_SERVICE_PACKAGE:-/oem/hd485/rv1106}
+SERVICE_PACKAGE=$(CDPATH= cd -- "$SERVICE_PACKAGE" && pwd)
+. "$SERVICE_PACKAGE/configs/rv1106-ttyS3.env"
+SERVICE_LOG_DIR=${HD485_SERVICE_LOG_DIR:-/userdata/hd-rs485}
+SERVICE_PID_FILE="$(dirname "$HD485_SOCKET")/hd485d-service.pid"
+
+camera_running() {
+    for f in /proc/[0-9]*/exe; do
+        x=$(readlink "$f" 2>/dev/null || true)
+        case "$x" in */hd_camera_app2|*/hd_camera_app2\ \(deleted\)) return 0;; esac
+    done
+    return 1
+}
+locate_daemon() {
+    SERVICE_PID=
+    for f in /proc/[0-9]*/exe; do
+        x=$(readlink "$f" 2>/dev/null || true)
+        case "$x" in
+            "$SERVICE_PACKAGE/bin/hd485d")
+                if [ -n "$SERVICE_PID" ]; then echo 'Multiple hd485d instances' >&2; return 1; fi
+                SERVICE_PID=${f#/proc/}; SERVICE_PID=${SERVICE_PID%/exe};;
+            */hd485d|*/hd485d\ \(deleted\))
+                echo "Other daemon owns a different deployment: $f -> $x" >&2; return 1;;
+        esac
+    done
+}
+healthy() {
+    SERVICE_STATUS=$("$SERVICE_PACKAGE/bin/hd485-example" "$HD485_SOCKET" status) || return 1
+    case "$SERVICE_STATUS" in *'mode=0 '*'error=0 '*) printf '%s\n' "$SERVICE_STATUS";; *) return 1;; esac
+}
+start_service() {
+    locate_daemon || return 1
+    if [ -n "$SERVICE_PID" ]; then healthy; return $?; fi
+    if camera_running; then echo 'Stop the camera App normally before starting hd485d' >&2; return 1; fi
+    if [ -e "$HD485_SOCKET" ]; then echo "Inspect the owner of stale socket $HD485_SOCKET first" >&2; return 1; fi
+    mkdir -p "$SERVICE_LOG_DIR" "$(dirname "$HD485_SOCKET")"
+    unset LD_PRELOAD HD485_TX_TRACE
+    (trap '' HUP; exec sh "$SERVICE_PACKAGE/tools/run-rv1106.sh" \
+        --lock-dir "${HD485_SERVICE_LOCK_DIR:-/run}" \
+        --allow-shell --allow-pty --fs-root /) </dev/null >>"$SERVICE_LOG_DIR/hd485d.log" 2>&1 &
+    SERVICE_PID=$!
+    printf '%s\n' "$SERVICE_PID" >"$SERVICE_PID_FILE"
+    for attempt in 1 2 3 4 5; do
+        if ! kill -0 "$SERVICE_PID" 2>/dev/null; then break; fi
+        if [ -S "$HD485_SOCKET" ] && healthy; then return 0; fi
+        sleep 1
+    done
+    echo "Daemon not ready; inspect $SERVICE_LOG_DIR/hd485d.log" >&2
+    return 1
+}
+stop_service() {
+    if camera_running; then echo 'Stop the camera App normally before stopping hd485d' >&2; return 1; fi
+    locate_daemon || return 1
+    if [ -z "$SERVICE_PID" ]; then return 0; fi
+    test "$(readlink /proc/"$SERVICE_PID"/exe)" = "$SERVICE_PACKAGE/bin/hd485d" || return 1
+    kill -TERM "$SERVICE_PID"
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+        if [ ! -e "/proc/$SERVICE_PID/exe" ]; then
+            rm -f "$SERVICE_PID_FILE"
+            return 0
+        fi
+        sleep 1
+    done
+    echo 'Daemon still exiting; no forced kill or lock removal performed' >&2
+    return 1
+}
+case "${1:-}" in
+    start) start_service;;
+    stop) stop_service;;
+    restart) stop_service && start_service;;
+    status) locate_daemon && test -n "$SERVICE_PID" && healthy;;
+    *) echo "Usage: $0 {start|stop|restart|status}" >&2; exit 2;;
+esac
