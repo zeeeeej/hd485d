@@ -18,7 +18,7 @@ listener.listen(1)
 log = (root / 'daemon.log').open('wb')
 process = subprocess.Popen([str(binary), '--device', os.ttyname(slave),
     '--socket', str(root / 'ipc.sock'), '--root', str(root / 'legacy'),
-    '--fs-root', str(root), '--lock-dir', str(root), '--allow-shell'], stdout=log, stderr=log)
+    '--fs-root', str(root), '--lock-dir', str(root), '--allow-shell', '--allow-pty'], stdout=log, stderr=log)
 connection = None
 try:
     for _ in range(100):

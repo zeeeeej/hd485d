@@ -114,10 +114,40 @@ static int gpio_open(int gpio) {
     snprintf(p, sizeof(p), "%s/value", dir);
     return open(p, O_WRONLY | O_CLOEXEC);
 }
+static int restore_priority(serial_port *s) {
+    if(!s->tx_priority_changed)return 0;
+    int e=pthread_setschedparam(pthread_self(),s->tx_policy,&s->tx_priority);
+    if(!e)s->tx_priority_changed=0;
+    return e;
+}
+static int anyka_drain(serial_port *s) {
+#ifdef __linux__
+    int64_t end=now_ms()+5000;
+    while(now_ms()<end) {
+        pthread_testcancel();
+        int queued=0,lsr=0;
+        if(ioctl(s->fd,TIOCOUTQ,&queued) || ioctl(s->fd,TIOCSERGETLSR,&lsr)) {
+            if(errno==EINTR)continue;
+            return -1;
+        }
+        if(!queued && (lsr&TIOCSER_TEMT)) {
+            int64_t guard=now_ms()+2;
+            while(now_ms()<guard)pthread_testcancel();
+            return 0;
+        }
+        if(queued>256)usleep(1000);
+    }
+    errno=ETIMEDOUT;
+#else
+    (void)s;errno=ENOTSUP;
+#endif
+    return -1;
+}
 static void cleanup_tx(void *v) {
     serial_port *s = v;
     (void)tcflush(s->fd, TCOFLUSH);
     (void)de(s, 0);
+    (void)restore_priority(s);
 }
 static void *worker(void *v) {
     serial_port *s = v;
@@ -136,7 +166,13 @@ static void *worker(void *v) {
         int err = 0;
         pthread_cleanup_push(cleanup_tx, s);
         pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
-        if (de(s, 1))
+        if(s->backend==3) {
+            err=pthread_getschedparam(pthread_self(),&s->tx_policy,&s->tx_priority);
+            struct sched_param priority={.sched_priority=1};
+            if(!err)err=pthread_setschedparam(pthread_self(),SCHED_FIFO,&priority);
+            if(!err)s->tx_priority_changed=1;
+        }
+        if (!err && de(s, 1))
             err = errno;
         else if (s->gpio_fd >= 0)
             usleep(100);
@@ -162,17 +198,19 @@ static void *worker(void *v) {
         if (!err) {
             int r;
             do {
-                r = tcdrain(s->fd);
+                r = s->backend==3 ? anyka_drain(s) : tcdrain(s->fd);
             } while (r < 0 && errno == EINTR);
             if (r < 0)
                 err = errno;
         }
-        if (!err && s->gpio_fd >= 0)
+        if (!err && s->gpio_fd >= 0 && s->backend!=3)
             usleep(5000);
         if (err)
             (void)tcflush(s->fd, TCOFLUSH);
         if (de(s, 0) && !err)
             err = errno;
+        int priority_error=restore_priority(s);
+        if(!err)err=priority_error;
         pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
         pthread_cleanup_pop(0);
         pthread_mutex_lock(&s->lock);
@@ -247,11 +285,11 @@ int serial_open(serial_port *s, const char *path, const char *backend, int gpio,
     s->exclusive = 1;
     if (serial_configure(s, c))
         goto fail;
-    if (!strcmp(backend, "gpio")) {
+    if (!strcmp(backend, "gpio") || !strcmp(backend,"gpio-anyka")) {
         s->gpio_fd = gpio_open(gpio);
         if (s->gpio_fd < 0)
             goto fail;
-        s->backend = 1;
+        s->backend = !strcmp(backend,"gpio-anyka") ? 3 : 1;
     } else if (!strcmp(backend, "kernel")) {
 #ifdef __linux__
         struct serial_rs485 rs = {0};

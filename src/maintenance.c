@@ -60,6 +60,7 @@ int maint_init(maintenance *m, const char *root, int allow, int timeout) {
     return 0;
 }
 void maint_cancel(maintenance *m, int reason) {
+    maint_pty_stop(m, reason);
     if (m->pid > 0 && m->cmd_state == 1) {
         m->cmd_state = reason;
         m->kill_at = now_ms() + 500;
@@ -90,6 +91,7 @@ static int unchanged(maintenance *m) {
 #endif
 }
 void maint_tick(maintenance *m) {
+    maint_pty_tick(m);
     for (int i = 0; i < 2; i++)
         if (m->pipes[i] >= 0) {
             unsigned char b[4096];
@@ -395,6 +397,8 @@ static int put_begin(maintenance *m, const unsigned char *p, size_t n, unsigned 
 int maint_request(maintenance *m, unsigned op, const unsigned char *p, size_t n, unsigned char *out,
                   size_t *len) {
     *len = 0;
+    if(op>=M_PTY_OPEN && op<=M_PTY_STATUS) return maint_pty_request(m,op,p,n,out,len);
+    if(maint_pty_busy(m) && op!=M_STATUS && op!=M_FS_INFO && op!=M_CANCEL) return EBUSY;
     switch (op) {
     case M_EXEC:
         return start_command(m, p, n);
@@ -588,6 +592,7 @@ int maint_request(maintenance *m, unsigned op, const unsigned char *p, size_t n,
     }
 }
 void maint_close(maintenance *m) {
+    maint_pty_destroy(m);
     if (m->pid > 0) {
         kill(-m->pgid, SIGKILL);
         while (waitpid(m->pid, NULL, 0) < 0 && errno == EINTR) {

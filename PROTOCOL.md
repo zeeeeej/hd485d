@@ -168,3 +168,44 @@ OLDPWD，下条命令从该目录执行。支持 `cd /userdata`、相对路径�
 内部使用 FD 9 和 EXIT trap 回报目录；显式覆盖该描述符／trap、或使用 exec 替换 Shell
 可能使本条命令不能回报目录，此时保留上次已确认的目录。
 Python CLI 每次启动都会创建新会话；跨 CLI 进程不保留目录。同一 HDTools 连接则保留。
+
+## 0.3.0 交互 PTY（方式一）
+
+`--allow-shell --allow-pty --mode idle` 启用；FS_INFO flags bit3（8）表示支持。
+普通 EXEC 和文件 API 不变。单维护会话最多一个 PTY；PTY 存在时 EXEC 和文件操作
+返回 EBUSY，状态查询仍可用。OPEN 与正在执行的命令/文件任务互斥。
+
+| 操作码 | 请求 | 成功应答 |
+|---|---|---|
+| 48 PTY_OPEN | rows:u16, cols:u16 | PTY 状态，无输出数据 |
+| 49 PTY_IO | id:u32, input_offset:u64, output_ack:u64, bytes[0..200] | PTY 状态及输出 |
+| 50 PTY_RESIZE | id:u32, rows:u16, cols:u16 | PTY 状态，无输出数据 |
+| 51 PTY_CLOSE | id:u32 | PTY 状态，可重复关闭 |
+| 52 PTY_STATUS | id:u32 | PTY 状态，无输出数据 |
+
+PTY 状态（不含通用 errno）：`id:u32, state:u8, exit:i32, eof:u8,
+input_next:u64, output_offset:u64, more:u8, length:u16, bytes[length]`，固定头 29 字节。
+state：1 运行、2 Shell 退出、3 关闭/取消/抢占、4 超时。exit 未产生为 -1。
+eof 仅在子进程已回收、输出已排空并确认后置 1。尺寸范围 1～1000。
+PTY ID 在服务生命周期内递增，不复用。不存在或不匹配的 ID 返回 ESTALE。
+
+input_offset 必须等于 input_next；成功表示输入已进入有界队列，不表示程序已经执行。
+输入队列 4 KiB，容量不足整块返回 EAGAIN，不接受其中一部分。超时重发保持请求 ID 和
+载荷不变，由通用应答缓存去重；EAGAIN 后用新请求 ID 重试同一偏移。
+output_ack 确认已接收的输出前缀，不得超出先前 IO 应答发送的范围。IO 返回从确认位置
+开始最多 200 字节，more 表示还有积压；输出队列 64 KiB，满时对 PTY 施加背压而不丢字节。
+关闭或超时会丢弃未确认的缓冲输出；随后到达、越过保留范围的 IO 确认返回 EINVAL，
+可用 STATUS 查询终态。stdout/stderr 合并为终端流，不能按普通 EXEC 的双流解析。
+
+PTY Shell 使用控制终端、TERM=xterm，从普通命令会话当前目录启动；其内部目录、环境和
+别名保留，关闭后不回写普通命令的目录。主机通过尺寸变更 ioctl 触发 SIGWINCH；
+Ctrl+C/Ctrl+D 等作为原始输入字节交给终端行规程。需要 HDTools 的终端模拟器显示。
+
+`--pty-timeout-ms` 默认 20000，范围 5000～300000；有效 PTY 请求更新保活。
+主机正常轮询维持连接。业务抢占立即禁止维护通信，关闭 PTY 并异步终止会话，500 ms
+宽限后强制回收；不阻塞业务仲裁。新 HELLO 取消旧会话。刻意 setsid 脱离的守护进程
+不属于交互作业回收保证。默认不支持断线恢复。
+
+HDTools 取消读取后不发送清理或后续按键，板端由超时回收；重新打开是显式新会话。
+正常“关闭交互终端”发送 CLOSE。运行时可能需要最多约 500 ms 完成进程回收。
+EOF/退出信息与终端提示符无关，不通过识别 Shell 文本决定会话是否结束。

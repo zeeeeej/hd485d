@@ -25,6 +25,7 @@ internal class Controller(private val scope: CoroutineScope,val demo: Boolean=fa
     var selected by mutableStateOf<Entry?>(null)
     var progress by mutableStateOf<Progress?>(null);private set
     var terminal by mutableStateOf("");private set
+    var pty by mutableStateOf<PtyConnection?>(null);private set
     var confirmation by mutableStateOf<Confirmation?>(null)
     var serialState by mutableStateOf(SerialState(SerialMode.CLOSED));private set
     private var serialSession: Session?=null
@@ -56,6 +57,18 @@ internal class Controller(private val scope: CoroutineScope,val demo: Boolean=fa
             finally {busy=false}
         }
     }
+    fun openPty()=task("打开交互终端") {
+        check(capabilities?.pty==true) {"板端未启用 PTY"}
+        val wire=checkNotNull(serialSession)
+        // Explicit new session on reopening: never attach to an abandoned shell.
+        if(pty!=null)withContext(Dispatchers.IO) {wire.hello();Thread.sleep(700)}
+        val connection=PtyConnection(wire) {status=it}
+        pty=connection
+        status="交互终端 · 等待应答期间按键排队，串口不写入"
+        status=withContext(Dispatchers.IO) {connection.run()}
+    }
+    fun closePty() {pty?.close();status="正在关闭交互终端…"}
+    fun showCommands() {if(!busy)pty=null}
     fun refreshPorts()=task("枚举串口") {
         ports=withContext(Dispatchers.IO) {SerialPort.getCommPorts().map {it.systemPortPath}.filterNot {it.startsWith("/dev/tty.")}.distinct().sorted()}
     }
@@ -132,11 +145,11 @@ internal class Controller(private val scope: CoroutineScope,val demo: Boolean=fa
     fun cancelRead() {
         if(serialSession?.cancelRead()==true) status="正在取消本次读取…"
     }
-    fun cancel() {remote?.cancelled?.set(true);status="正在取消任务…"}
+    fun cancel() {pty?.close();remote?.cancelled?.set(true);status="正在取消任务…"}
     suspend fun shutdown() {
-        remote?.cancelled?.set(true);serialSession?.cancelRead();work?.join()
+        pty?.close();remote?.cancelled?.set(true);serialSession?.cancelRead();work?.join()
         withContext(Dispatchers.IO) {remote?.close()}
-        remote=null;serialSession=null;connected=false;capabilities=null;entries=emptyList();selected=null;confirmation=null
+        remote=null;serialSession=null;connected=false;capabilities=null;entries=emptyList();selected=null;confirmation=null;pty=null
         serialState=SerialState(SerialMode.CLOSED)
         status="串口已关闭"
     }
@@ -173,7 +186,7 @@ internal class DemoDevice: Device {
     private val data=mutableMapOf("/userdata/read me.txt" to "HDTools 485 设备文件演示\n".toByteArray(),"/userdata/.hidden" to byteArrayOf(1,2,3))
     override fun list(path: String): List<Entry> = if(path=="/") listOf(Entry("userdata",0x41ed,4096,1795046400),Entry("etc",0x41ed,4096,1795046400),Entry("dev",0x41ed,4096,1795046400)) else data.filterKeys {it.substringBeforeLast('/')==path}.map {Entry(it.key.substringAfterLast('/'),0x81a4,it.value.size.toLong(),1795046400)}
     override fun stat(path: String)=data[path]?.let {Entry(path.substringAfterLast('/'),0x81a4,it.size.toLong(),1795046400)}
-    override fun execute(command: String,output: (Int,ByteArray)->Unit): CommandResult {output(0,"演示模式：$command\nhd485d 0.2.1\n".toByteArray());return CommandResult(0,false)}
+    override fun execute(command: String,output: (Int,ByteArray)->Unit): CommandResult {output(0,"演示模式：$command\nhd485d 0.3.0\n".toByteArray());return CommandResult(0,false)}
     override fun upload(local: File,remote: String,overwrite: Boolean,progress: (Progress)->Unit) {data[remote]=local.readBytes();progress(Progress(local.length(),local.length(),10000))}
     override fun download(remote: String,local: File,overwrite: Boolean,progress: (Progress)->Unit) {local.writeBytes(data.getValue(remote));progress(Progress(local.length(),local.length(),10000))}
     override fun close() {}

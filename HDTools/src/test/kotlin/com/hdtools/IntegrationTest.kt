@@ -56,6 +56,59 @@ class IntegrationTest {
         assertContentEquals(content,downloaded.readBytes())
         assertFailsWith<IllegalArgumentException> {d.download("/uploaded.bin",downloaded,false) {}}
     }
+    @Test fun terminalWidgetRendersActualPty()=peer {d,_->
+        val terminal=PtyConnection(d.wire)
+        val pool=java.util.concurrent.Executors.newSingleThreadExecutor()
+        var frame:javax.swing.JFrame?=null
+        var widget:com.jediterm.terminal.ui.JediTermWidget?=null
+        val pump=pool.submit<String> {terminal.run()}
+        try {
+            javax.swing.SwingUtilities.invokeAndWait {
+                widget=com.jediterm.terminal.ui.JediTermWidget(80,24,com.jediterm.terminal.ui.settings.DefaultSettingsProvider())
+                widget!!.ttyConnector=terminal
+                frame=javax.swing.JFrame("HDTools PTY validation").apply {add(widget);setSize(900,500);isVisible=true}
+                widget!!.start()
+            }
+            terminal.write("stty -echo; printf '\\033[2J\\033[H\\033[32mHDTools PTY\\033[0m\\n'; pwd; stty size\n")
+            Thread.sleep(1500)
+            javax.swing.SwingUtilities.invokeAndWait {
+                val image=java.awt.image.BufferedImage(900,500,java.awt.image.BufferedImage.TYPE_INT_RGB)
+                val graphics=image.createGraphics();frame!!.paintAll(graphics);graphics.dispose()
+                javax.imageio.ImageIO.write(image,"png",File(System.getenv("HD485_SOURCE"),"build/pty-widget-preview.png"))
+            }
+            terminal.close();assertTrue(pump.get(5,java.util.concurrent.TimeUnit.SECONDS).contains("关闭"))
+        } finally {
+            terminal.close();d.wire.cancelRead();pool.shutdownNow()
+            javax.swing.SwingUtilities.invokeAndWait {widget?.close();frame?.dispose()}
+        }
+    }
+
+    @Test fun interactiveShellThroughDesktopConnector()=peer {d,_->
+        assertTrue(d.capabilities.pty)
+        val terminal=PtyConnection(d.wire)
+        val pool=java.util.concurrent.Executors.newFixedThreadPool(2)
+        val text=StringBuffer()
+        val pump=pool.submit<String> {terminal.run()}
+        pool.submit {val chars=CharArray(256);while(true) {val n=terminal.read(chars,0,chars.size);if(n<0)break;text.append(chars,0,n)}}
+        fun await(needle:String) {
+            val deadline=System.nanoTime()+8_000_000_000L
+            while(!text.contains(needle) && System.nanoTime()<deadline)Thread.sleep(20)
+            assertTrue(text.contains(needle),text.toString())
+        }
+        try {
+            terminal.write("stty -echo; export HDTEST=desktop; cd /; printf '__%s__' ready\n")
+            await("__ready__")
+            terminal.resize(com.jediterm.core.util.TermSize(99,33))
+            terminal.write("stty size; printf '__%s__' \"\$HDTEST\"\n")
+            await("__desktop__");assertTrue(text.contains("33 99"))
+            terminal.write("sleep 30\n");Thread.sleep(150);terminal.write(byteArrayOf(3))
+            terminal.write("printf '__%s__' interrupted\n");await("__interrupted__")
+            terminal.write("exit 9\n")
+            assertTrue(pump.get(8,java.util.concurrent.TimeUnit.SECONDS).contains("9"))
+            assertEquals(9,terminal.waitFor())
+        } finally {terminal.close();d.wire.cancelRead();pool.shutdownNow()}
+    }
+
     @Test fun cancellationAndExplicitResume()=peer {d,root->
         val local=File(root,"source.bin");local.writeBytes(ByteArray(1200) {it.toByte()})
         assertFailsWith<Stopped> {d.upload(local,"/resumed.bin",false) {if(it.bytes>=240)d.cancelled.set(true)}}

@@ -1,8 +1,13 @@
-# RV1106 部署交接：0.2.1
+# RV1106 / Anyka 部署交接：0.3.0
 
-板卡环境、PTY 基线及后续测量要求见 [BOARD_PTY.md](BOARD_PTY.md)。
+当前两板已启动 0.3.0，具体启动命令见文末「PTY 0.3.0 调试部署」。
 
-## 当前运行状态：0.2.1
+xpl 于 2026-11-20 确认验证完毕。本次更新仅整理文档并提交源码，未重新部署、重启或
+读取板端运行状态；下述 PID 和状态均为此前部署交接时的记录。
+
+板卡环境、PTY 基线及实测结果见 [BOARD_PTY.md](BOARD_PTY.md)。
+
+## 0.2.1 历史运行状态
 
 2026-11-19 修复 cd 后已部署 **hd485d 0.2.1**，PID **965**（此次交接值），方式一
 `idle --allow-shell --fs-root /`。程序、日志及 PID 文件位于：
@@ -165,3 +170,64 @@ kill "$HD485_PID"
 
 HDTools 未提供创建目录按钮；测试子目录可由操作者在终端使用 `mkdir` 创建。
 真实串口与小文件功能已验证；大文件吞吐、长期稳定性及 Windows COM 口仍待专项验收。
+
+## PTY 0.3.0 调试部署（2026-11-19）
+
+本节为新增交互终端部署；前面的 0.2.1/0.2.0 保留为历史回退记录。
+xpl 已确认两板部署、测量并保留新版供调试。未修改开机配置或原厂程序文件。
+
+### RV1106
+
+- 新目录 `/userdata/tmp_var/hd-rs485-drive-0.3.0`，最终 PID 1921。
+- 旧 PID 965 在确认 owner=0 后正常退出，旧 0.2.1 目录保留。
+- UART ttyS3 / 230400 / GPIO35，IPC `/run/hd485.sock`。
+
+从已解包目录启动（先核验 UART/Socket 无其他所有者）：
+
+```sh
+cd /userdata/tmp_var/hd-rs485-drive-0.3.0
+(trap '' HUP; exec ./rv1106/bin/hd485d \
+  --device /dev/ttyS3 --socket /run/hd485.sock \
+  --root /userdata/hd-rs485/files --fs-root / \
+  --baud 230400 --de gpio --gpio 35 --mode idle \
+  --allow-shell --allow-pty) </dev/null >hd485d.log 2>&1 &
+echo $! >hd485d.pid
+./rv1106/bin/hd485-example /run/hd485.sock status
+```
+
+### Anyka
+
+- 新目录 `/userdata/hd-rs485-drive-0.3.0`，最终 PID 3926。
+- 原厂 PID 426 收到 SIGTERM 后正常退出；日志明确出现 `watchdog stopped`、PWM disabled
+  和摄像头反初始化完成。boot_id 未变，没有重启。原厂文件及 `/etc/config/app.sh` 未修改。
+- 用同一工具链编译的 0.2.1 基线放在同目录 `hd485d-baseline-0.2.1`；测量后正常停止。
+- UART ttySAK2 / **460800** / GPIO5，IPC `/tmp/hd485.sock`，锁目录 `/tmp`。
+  百事参考应用的 230400 不适用于当前调试配置。
+- 此板不提供 nohup，使用以下经过验证的启动方式。
+
+```sh
+cd /userdata/hd-rs485-drive-0.3.0
+(trap '' HUP; exec sh ./anyka/tools/run-anyka.sh \
+  --fs-root / --allow-shell --allow-pty) </dev/null >hd485d.log 2>&1 &
+echo $! >hd485d.pid
+./anyka/bin/hd485-example /tmp/hd485.sock status
+```
+
+run-anyka.sh 检查 UART 和 watchdog 占用，不负责停止原厂业务或自动关闭看门狗。
+程序成功初始化后进入方式一；连接 HDTools 本身不创建 PTY，点击“打开交互终端”后
+才创建 Shell。退出、抢占、断线超时后回收。HDTools 需要 0.2.0（Mac 包 1.2.0）。
+
+### 停止与恢复
+
+先读取 hd485d.pid，再用 `/proc/<PID>/exe` 确认指向本次目录，发送 SIGTERM，等待进程、
+Socket 和锁退出。禁止不核对 PID 就复制历史 kill 命令；禁止删除仍有所有者的锁或 Socket。
+RV1106 可按历史参数启动保留的 0.2.1。
+Anyka 如需恢复原厂业务，在新服务完全退出后按原有目录和环境启动：
+
+```sh
+(trap '' HUP; exec env LD_LIBRARY_PATH=/etc/config \
+  /etc/config/fridge_ipc /userdata/fridge_inspector.ini) </dev/null >/tmp/fridge-restored.log 2>&1 &
+```
+
+上面的原厂恢复命令本轮未执行（按要求保留 PTY 调试服务）。重启会按原开机配置恢复原厂业务，
+不会自动启动本次 hd485d。资源数据、完整测试范围和产物指纹见 BOARD_PTY.md、VALIDATION.md。

@@ -222,3 +222,109 @@ pwd -P 可能修改 PWD，分别以显式参数恢复 OLDPWD和子 Shell
 这是工作目录保持，不是完整交互式 Shell；export、函数和 alias 不跨请求保留。
 显式覆盖内部 FD 9／EXIT trap 或 exec 替换 Shell 可能无法回报目录，详见 PROTOCOL.md。
 Windows 仍未实机验收。本轮未提交 Git。
+
+
+## 2026-11-19：PTY 0.3.0 / HDTools 0.2.0 双板验收
+
+先按授权提交基线 394acb9，再实现单 PTY、输入偏移/输出确认、有界缓冲、超时及
+业务抢占回收；HDTools 使用 JediTerm 3.72 提供交互屏幕。本节记录提交前的实现与验证结果，后续确认见文末。
+
+### 自动验证
+
+- macOS：CTest 通过，33 项 Python 集成通过（包含 4 项新增 PTY 用例）。
+- Linux：CTest 通过，31 项 Python 集成通过；Python 3.10 不执行两个依赖
+  hashlib.file_digest 的旧 CLI 用例，这两项在 Mac 已通过。初次并行运行共享 Socket
+  产生冲突，清理测试进程后串行重跑通过；build/pty-linux.log 是初次失败记录，不能
+  将其作为通过证据。最终修复后的串行运行 31 项耗时 47.010 秒，记录在 build/pty-linux-full-final.log。
+- HDTools：13 项 JVM 用例通过（8 项集成、5 项串口状态）。包含真实服务互通及
+  JediTerm 屏幕解析，覆盖 PTY、普通命令/文件互斥和原读写状态回归。
+- Mac 应用和 DMG 1.2.0 构建成功、codesign 校验通过。Windows 未实机验收。
+
+证据：build/pty-full-mac-final.log、build/pty-linux-full-final.log、build/pty-desktop-test-final.log、
+build/pty-final-TEST-com.hdtools.{IntegrationTest,SerialModeTest}.xml。
+
+### 两板实测
+
+- RV1106：ttyS3 / 230400 / GPIO35；Anyka：ttySAK2 / 460800 / GPIO5。
+  两板均运行方式一 idle，启用 --allow-shell --allow-pty --fs-root /。
+- 通过真实 RS485 打开 Shell，验证交互输入、窗口设置、Ctrl+C、top、vi 保存并回读
+  64 KiB 文件的修改。使用 HDTools 的 SerialIO/Session/PtyConnection/JediTerm 组件
+  再次验证真实屏幕，2 项通过；保存 vi/top 截图。该测试覆盖实际终端组件，未冒充
+  全部 Compose 按钮的人工点击验收。
+- 各内存场景持续 60 秒采样，服务/Shell/前台应用分列 RSS，并计算 PSS 合计。
+  连续开关 20 次及 21 秒断线超时后，PTY 数为 0、服务 FD 为 11，没有残留测试子进程。
+  RV1106 稳定 RSS 956 KiB，Anyka 980 KiB；未观察到循环持续增长。
+- SDK 发送 PTY_PREEMPT_CHECK，旧维护会话失效；业务释放后显式 HELLO 重连正常，
+  两板最终 owner=0、error=0。没有自动抢回业务控制权。
+- 使用真实 HDTools 串口会话，发送请求进入读模式后手动取消；2 项通过，确认收到
+  ReadCancelled 且 400 ms 观察期内无重试/轮询/清理写入。板端随后按租约超时回收。
+- Anyka 原厂应用正常退出，日志确认 watchdog stopped；两板 boot_id 未变，保留
+  新服务运行供调试。未改原程序或开机配置。已停止原相机，尚未进行并行业务峰值测试。
+
+证据：build/pty-{rv1106,anyka}-audit-final-release.{json,log}、
+build/pty-{rv1106,anyka}-preemption-final.log、build/pty-desktop-live.xml、
+build/pty-desktop-live-cancel.xml、build/pty-live-{rv1106,anyka}-{vi,top}.png。
+完整资源表见 BOARD_PTY.md，启动/回退见 DEPLOYMENT.md。
+实机 Kotlin 源码及 Gradle init 保存在 ~/Documents/tmp/hd-rs485-drive/pty-live/，
+不会让默认测试自动连接串口；板端采样和抢占脚本在 tools/pty_*audit.py，需显式指定设备。
+
+### 交付指纹
+
+Release 构建，未额外 strip；PTY 不新增板端动态库依赖。以下为实际运行的服务：
+
+| 平台 | hd485d 字节 | SHA-256 |
+|---|---:|---|
+| RV1106 | 71,524 | 281d51fa6094217d2cc44ba5849d1213dd34bdf24ea116d7876ff195f6c57f92 |
+| Anyka | 58,700 | 5bcd9524b45e3a599d940ff6e80de008685458417fedda5b01c3bcd9c4c9494e |
+
+最终边界检查补充：关闭/超时释放输出后，迟到的 IO 确认被拒绝，避免长度下溢。
+该用例已加入既有关闭/超时测试；Mac 33 项及 Linux 31 项均重新通过。
+两板随后更新最终二进制，重新进行场景测量与会话回收验收。
+真实串口也验证了关闭后的迟到确认返回 EINVAL，服务仍能执行 @version；
+证据 build/pty-live-late-ack.log。
+
+最终交付包已补入本次板卡/部署文档和 Python macOS 460800 支持，服务二进制不变。
+安装总字节是包内普通文件长度合计（含 SDK 静态库、示例、工具和文档），不是文件系统块占用。
+
+| 包 | 安装总字节 | tar 字节 | tar SHA-256 |
+|---|---:|---:|---|
+| rv1106 | 166,247 | 184,320 | acc191fe8681372e6d568f7a13520b62c843837f06adaf121c880eed2e230cef |
+| anyka | 155,813 | 174,080 | 273f77d2be7c514ec44589d3f0dfc51c330e04980c80fac13fb0aa7c9c7515c1 |
+
+Mac DMG：HDTools/build/compose/binaries/main/dmg/HDTools-1.2.0.dmg，75,651,992 字节，
+SHA-256：cac4f0b196a774c158eea6f32d6792d41840834f24a96db7b3a2c2e508ba74a8。
+每个包附 .sha256；详细验证记录位于源码仓库，板端包附 BOARD_PTY.md / DEPLOYMENT.md。
+
+
+### 最终交接状态
+
+两板均保留最终 0.3.0 服务：RV1106 PID 1921，Anyka PID 3926；owner=0、error=0，
+PTY=0、服务 FD=11。boot_id 与最初检查一致，未发生重启。最终包与运行二进制的板端
+MD5 均与主机一致，更新文档时仅解包文档/工具，没有覆盖运行中的可执行文件。
+两板版本目录另存 resource-results.txt；原始采样和完整证据保留在主机 build/。
+
+在完成后续 GUI、抢占、迟到确认及手动取消测试后，最终单次 RSS 为 RV1106 964 KiB、
+Anyka 984 KiB（PSS 分别 603/984 KiB）。这与 60 秒分场景采样的关闭值属于不同阶段，
+完整记录于 build/pty-final-handoff.log；没有把单次变化直接解释为泄漏或内存上限。
+
+最终包 MD5：RV1106 fca897cd396929471d3a148dde4252da；
+Anyka b7dcfbd9912b56930df57e690b20b66d。传输日志为
+build/pty-{rv1106,anyka}-final-transfer.log；退出所有测试程序后，主机四个指定串口
+及对应 tty 别名均无占用，可直接用 HDTools 连接。该次实机交接时尚未提交 PTY 改动。
+
+
+## 2026-11-20：用户验证确认与源码提交
+
+xpl 确认“验证完毕”，授权更新文档并提交 Git。本次提交包含 hd485d 0.3.0 PTY、
+Anyka 平台适配、HDTools 0.2.0 交互终端，以及协议、部署、资源和架构记录。
+新增 ARCHITECTURE.md，补齐架构图、控制状态图、PTY 时序图及源码入口；
+BOARD_PTY.md 增加内存/磁盘摘要，修正文档中的 HDTools 应用与安装包版本映射。
+
+用户未补充逐项测试清单；技术验收范围沿用前述记录，不扩展为 Windows COM、
+相机并行峰值、任意大文件吞吐或长期稳定性均已验收。
+本次仅更新文档并核对既有测试证据；生产代码保持双板最终验收时的版本。
+已有结果：Mac 33 项、Linux 31 项集成，13 项 JVM，以及双板真实终端、取消读取、
+业务抢占、20 次回收和超时测试通过。未重新连接板卡或改变部署状态。
+
+交付包哈希仍对应 2026-11-19 已部署的产物；本次文档更新未重新打包或上传。
+构建产物、安装包与原始测试证据继续按 .gitignore 留在本地；本次仅本地提交，不执行 push。

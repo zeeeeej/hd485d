@@ -41,7 +41,8 @@ enum {
     M_FS_STAT,
     M_FS_PUT,
     M_FS_GET,
-    M_FILE_CLOSE
+    M_FILE_CLOSE,
+    M_PTY_OPEN = 0x30, M_PTY_IO, M_PTY_RESIZE, M_PTY_CLOSE, M_PTY_STATUS
 };
 uint16_t rd16(const void *p);
 uint32_t rd32(const void *p);

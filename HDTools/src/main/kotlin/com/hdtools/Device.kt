@@ -17,7 +17,7 @@ internal data class Entry(val name: String,val mode: Int,val size: Long,val modi
     val type get()=when(mode and 0xf000) {0x4000->"目录";0x8000->"文件";0xa000->"链接";else->"特殊"}
     val permissions get()=(mode and 4095).toString(8)
 }
-internal data class Capabilities(val files: Boolean,val shell: Boolean,val root: String,val maxFile: Long=64*1024*1024,val sessionCwd: Boolean=false)
+internal data class Capabilities(val files: Boolean,val shell: Boolean,val root: String,val maxFile: Long=64*1024*1024,val sessionCwd: Boolean=false,val pty:Boolean=false)
 internal data class Progress(val bytes: Long,val total: Long,val speed: Long)
 internal data class CommandResult(val exit: Int,val truncated: Boolean)
 internal class Stopped: Exception("已取消；文件断点保留，可重新选择同一文件恢复")
@@ -37,7 +37,7 @@ internal interface Device: AutoCloseable {
     fun upload(local: File,remote: String,overwrite: Boolean, progress: (Progress)->Unit)
     fun download(remote: String,local: File,overwrite: Boolean,progress: (Progress)->Unit)
 }
-internal class RemoteDevice(private val wire: Session): Device {
+internal class RemoteDevice(internal val wire: Session): Device {
     override val cancelled=AtomicBoolean()
     override val capabilities: Capabilities
     init {
@@ -48,7 +48,7 @@ internal class RemoteDevice(private val wire: Session): Device {
             val flags=b.short.toInt(); val max=b.long; require(b.short.toInt()==240)
             val size=b.short.toInt() and 65535;require(b.remaining()==size)
             val root=ByteArray(size);b.get(root)
-            Capabilities(flags and 1!=0,flags and 2!=0,String(root,Charsets.UTF_8),max,flags and 4!=0)
+            Capabilities(flags and 1!=0,flags and 2!=0,String(root,Charsets.UTF_8),max,flags and 4!=0,flags and 8!=0)
         } catch(e:DeviceError) {
             if(e.errno !in listOf(95,45)) throw e
             Capabilities(false,true,"")

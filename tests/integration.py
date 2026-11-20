@@ -106,6 +106,8 @@ class Integration(unittest.TestCase):
             extra = ['--test-client-fds', ','.join(str(b.fileno()) for a,b in self.pairs)]
         if 'fs_' in self._testMethodName:
             extra += ['--fs-root', str(self.folder)]
+        if 'interactive_' in self._testMethodName:
+            extra += ['--allow-pty', '--pty-timeout-ms', '5000']
         no_flock = 'no_flock' in self._testMethodName
         binary = 'hd485d-test' if self.inherited or no_flock else 'hd485d'
         environment = os.environ.copy()
@@ -125,7 +127,7 @@ class Integration(unittest.TestCase):
             if self.process.poll() is not None:
                 self.log.flush()
                 self.fail((self.folder/'daemon.log').read_text())
-            if (self.inherited and 'hd485d 0.2.1' in (self.folder/'daemon.log').read_text()) or (not self.inherited and self.socket_path.exists()):
+            if (self.inherited and 'hd485d 0.3.0' in (self.folder/'daemon.log').read_text()) or (not self.inherited and self.socket_path.exists()):
                 break
             time.sleep(0.01)
         else:
@@ -411,7 +413,7 @@ class Integration(unittest.TestCase):
         self.assertEqual((rc,out.getvalue(),err.getvalue()),(7,b'hello',b'error'))
         out,err=io.BytesIO(),io.BytesIO()
         self.assertEqual(self.host.execute('@version',out,err),0)
-        self.assertEqual(out.getvalue(),b'hd485d 0.2.1\n')
+        self.assertEqual(out.getvalue(),b'hd485d 0.3.0\n')
 
     def test_shell_timeout_and_output_cap(self):
         self.host.hello();self.host.call(EXEC,b'sleep 5')
@@ -579,6 +581,103 @@ class Integration(unittest.TestCase):
         self.assertEqual(result.returncode,0,result.stderr)
         reader.join(3)
         self.assertEqual(received,[b'SDK'])
+
+    def pty_open(self):
+        self.host.hello()
+        b=self.host.call(48,struct.pack('<HH',24,80))
+        self.pty_id=struct.unpack_from('<I',b)[0]
+        self.pty_in=self.pty_out=0
+        return self.pty_id
+
+    def pty_io(self,data=b''):
+        b=self.host.call(49,struct.pack('<IQQ',self.pty_id,self.pty_in,self.pty_out)+data)
+        ident,state,code,eof,inp,off,more,length=struct.unpack_from('<IBiBQQBH',b)
+        self.assertEqual(ident,self.pty_id)
+        self.assertEqual(inp,self.pty_in+len(data))
+        self.assertEqual(off,self.pty_out)
+        self.assertEqual(len(b),29+length)
+        self.pty_in=inp;self.pty_out+=length
+        return b[29:],state,eof,code
+
+    def pty_until(self,needle,timeout=4):
+        result=b'';end=time.monotonic()+timeout
+        while time.monotonic()<end:
+            data,_,_,_=self.pty_io();result+=data
+            if needle in result:return result
+            time.sleep(.02)
+        self.fail(repr(result))
+
+    def test_interactive_shell_resize_and_exit(self):
+        self.pty_open()
+        self.pty_until(b'#' if os.getuid()==0 else b'$')
+        self.pty_io(b"stty -echo; export HDPTY=works; cd /; printf '__%s__' $HDPTY\n")
+        self.pty_until(b'__works__')
+        self.host.call(50,struct.pack('<IHH',self.pty_id,31,97))
+        self.pty_io(b"pwd; stty size; printf '__%s__' $HDPTY\n")
+        out=self.pty_until(b'__works__')
+        self.assertIn(b'31 97',out);self.assertIn(b'/\r\n',out)
+        self.pty_io(b'exit 7\n')
+        end=time.monotonic()+4
+        while time.monotonic()<end:
+            _,state,eof,code=self.pty_io()
+            if eof:break
+            time.sleep(.02)
+        self.assertEqual((state,eof,code),(2,1,7))
+        self.host.call(EXEC,b'printf ordinary')
+
+    def test_interactive_ctrl_c_close_and_timeout(self):
+        self.pty_open();self.pty_until(b'#' if os.getuid()==0 else b'$')
+        self.pty_io(b'stty -echo; sleep 30\n');time.sleep(.1)
+        self.pty_io(b'\x03');time.sleep(.1)
+        self.pty_io(b"printf '__%s__' alive\n");self.pty_until(b'__alive__')
+        with self.assertRaises(OSError) as e:self.host.call(EXEC,b'true')
+        self.assertEqual(e.exception.errno,errno.EBUSY)
+        self.host.call(51,struct.pack('<I',self.pty_id))
+        self.host.call(51,struct.pack('<I',self.pty_id))
+        # The final output was sent but not yet acknowledged when CLOSE freed
+        # the buffer. A delayed IO ACK must not underflow the buffer length.
+        self.assert_errno(errno.EINVAL,self.host.call,49,
+                          struct.pack('<IQQ',self.pty_id,self.pty_in,self.pty_out))
+        self.assertEqual(self.host.call(52,struct.pack('<I',self.pty_id))[4],3)
+        time.sleep(.7)
+        self.host.call(EXEC,b'true');time.sleep(.1)
+        self.pty_open()
+        self.pty_until(b'#' if os.getuid()==0 else b'$')
+        time.sleep(5.3)
+        self.assert_errno(errno.EINVAL,self.host.call,49,
+                          struct.pack('<IQQ',self.pty_id,self.pty_in,self.pty_out))
+        b=self.host.call(52,struct.pack('<I',self.pty_id))
+        self.assertEqual(b[4],4)
+        time.sleep(.6)
+        self.host.call(EXEC,b'true')
+
+    def test_interactive_replay_and_backpressure(self):
+        self.pty_open();self.pty_until(b'#' if os.getuid()==0 else b'$')
+        self.pty_io(b'stty -echo\n');time.sleep(.1)
+        # Repeat the identical wire request ID: no duplicated command execution.
+        payload=struct.pack('<IQQ',self.pty_id,self.pty_in,self.pty_out)+b"printf '__%s__' ONCE\n"
+        first=self.host.call(49,payload)
+        self.host.request-=1
+        second=self.host.call(49,payload)
+        self.assertEqual(first,second)
+        b=first
+        self.pty_in=struct.unpack_from('<Q',b,10)[0]
+        self.pty_out+=struct.unpack_from('<H',b,27)[0]
+        collected=b[29:]+self.pty_until(b'__ONCE__') if b'__ONCE__' not in b[29:] else b[29:]
+        for _ in range(3):collected+=self.pty_io()[0]
+        self.assertEqual(collected.count(b'__ONCE__'),1)
+        self.pty_io(b"head -c 90000 /dev/zero | tr '\\0' X; printf '__%s__' END\n")
+        time.sleep(.3)
+        data=self.pty_until(b'__END__',15)
+        self.assertEqual(data.count(b'X'),90000)
+
+    def test_interactive_business_preemption(self):
+        self.pty_open()
+        client=self.client();client.call(1,struct.pack('<I',0))
+        time.sleep(.7)
+        client.call(2)
+        self.host.hello()
+        self.host.call(EXEC,b'printf business-released')
 
 
 if __name__=='__main__':

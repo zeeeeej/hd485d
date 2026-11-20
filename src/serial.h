@@ -8,7 +8,8 @@ typedef struct {
 } port_config;
 typedef struct {
     int fd, gpio_fd, backend, busy, ready, result, stopping, started, exclusive;
-    int lock_fd;
+    int lock_fd, tx_policy, tx_priority_changed;
+    struct sched_param tx_priority;
     char lock_path[PATH_MAX];
     int64_t start;
     size_t len;

@@ -72,7 +72,7 @@ int maint_fs_request(maintenance *m, unsigned op, const unsigned char *p, size_t
         if (n) return EINVAL;
         size_t rootlen = strlen(m->fsroot_path);
         wr16(out, 1); /* extension revision */
-        wr16(out + 2, (m->fsroot >= 0 ? 1 : 0) | (m->allow_shell ? 6 : 0));
+        wr16(out + 2, (m->fsroot >= 0 ? 1 : 0) | (m->allow_shell ? 6 : 0) | (m->allow_pty ? 8 : 0));
         wr64(out + 4, 64u * 1024u * 1024u);
         wr16(out + 12, 240); wr16(out + 14, (uint16_t)rootlen);
         memcpy(out + 16, m->fsroot_path, rootlen);

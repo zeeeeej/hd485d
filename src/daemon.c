@@ -644,16 +644,16 @@ static void progress(server *s) {
 }
 static void usage(void) {
     fprintf(stderr, "hd485d --device PATH --socket PATH --root DIR [--baud 230400] [--mode "
-                    "idle|coexist] [--de none|gpio|kernel] [--gpio 35] [--address 1] "
+                    "idle|coexist] [--de none|gpio|gpio-anyka|kernel] [--gpio 35] [--address 1] "
                     "[--response-ms 500] [--allow-shell] [--command-timeout-ms 30000] "
-                    "[--lock-dir /run] [--fs-root DIR]\n");
+                    "[--lock-dir /run] [--fs-root DIR] [--allow-pty] [--pty-timeout-ms 20000]\n");
 }
 static int version_command(const char *args, unsigned char *out, size_t capacity, size_t *length,
                            void *context) {
     (void)context;
     if (*args)
         return 2;
-    const char *text = "hd485d 0.2.1\n";
+    const char *text = "hd485d 0.3.0\n";
     *length = strlen(text);
     if (*length > capacity)
         return 1;
@@ -663,7 +663,7 @@ static int version_command(const char *args, unsigned char *out, size_t capacity
 int main(int argc, char **argv) {
     const char *device = NULL, *sock = "/run/hd485.sock", *root = "/userdata/hd-rs485/files",
                *backend = "none", *lock_dir = "/run", *fsroot = NULL;
-    int gpio = 35, allow = 0, timeout = 30000;
+    int gpio = 35, allow = 0, timeout = 30000, allow_pty = 0, pty_timeout = 20000;
     int inherited = 0;
     server *s = calloc(1, sizeof(*s));
     if (!s)
@@ -675,6 +675,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < CLIENTS; i++)
         s->clients[i].fd = -1;
     for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--allow-pty")) {allow_pty=1;continue;}
         if (!strcmp(argv[i], "--allow-shell")) {
             allow = 1;
             continue;
@@ -729,6 +730,8 @@ int main(int argc, char **argv) {
             s->address = (unsigned)atoi(v);
         else if (!strcmp(k, "--response-ms"))
             s->response_ms = (unsigned)atoi(v);
+        else if (!strcmp(k, "--pty-timeout-ms"))
+            pty_timeout = atoi(v);
         else if (!strcmp(k, "--command-timeout-ms"))
             timeout = atoi(v);
         else {
@@ -739,11 +742,13 @@ int main(int argc, char **argv) {
     }
     if (!device || strlen(sock) >= sizeof(((struct sockaddr_un *)0)->sun_path) || !s->address ||
         s->address > 65535 || s->response_ms < 20 || s->response_ms > 5000 || timeout < 100 ||
-        timeout > 3600000 || gpio < 0) {
+        timeout > 3600000 || gpio < 0 || pty_timeout < 5000 || pty_timeout > 300000 ||
+        (allow_pty && (!allow || s->coexist))) {
         usage();
         free(s);
         return 2;
     }
+    if(allow_pty && setenv("TERM","xterm",1)) {free(s);return 1;}
     signal(SIGPIPE, SIG_IGN);
     signal(SIGINT, signal_stop);
     signal(SIGTERM, signal_stop);
@@ -752,6 +757,7 @@ int main(int argc, char **argv) {
         free(s);
         return 1;
     }
+    s->maint.allow_pty=allow_pty; s->maint.pty_timeout_ms=pty_timeout;
     if (fsroot && maint_fs_init(&s->maint, fsroot)) {
         perror("filesystem root");
         maint_close(&s->maint);
@@ -790,7 +796,7 @@ int main(int argc, char **argv) {
             goto fail;
         }
     }
-    fprintf(stderr, "hd485d 0.2.1: %s %u 8N1, mode=%s, de=%s, socket=%s\n", device, s->idle.baud,
+    fprintf(stderr, "hd485d 0.3.0: %s %u 8N1, mode=%s, de=%s, socket=%s\n", device, s->idle.baud,
             s->coexist ? "coexist" : "idle", backend, sock);
     while (!quitting) {
         struct pollfd p[CLIENTS + 2];

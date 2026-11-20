@@ -87,7 +87,7 @@ private fun preview(output: String)=runBlocking {
                 Text("HDTools",fontSize=20.sp,color=MaterialTheme.colorScheme.primary)
                 Text("485 设备文件与命令终端",fontSize=13.sp)
                 Spacer(Modifier.weight(1f))
-                Text(if(c.demo) "演示模式" else "v0.1.3 · H485",color=Color(0xff697586))
+                Text(if(c.demo) "演示模式" else "v0.2.0 · H485",color=Color(0xff697586))
                 Text(if(c.connected) "● 已连接" else "○ 未连接",color=if(c.connected)Color(0xff25805e) else Color.Gray)
             }
             Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(7.dp)) {
@@ -145,9 +145,13 @@ private fun preview(output: String)=runBlocking {
                 SelectionContainer {Text(pickerError.ifEmpty {c.status},Modifier.weight(1f),maxLines=3,fontSize=11.sp)}
                 Spacer(Modifier.weight(0.01f))
                 if(c.busy)SmallButton("取消任务",true,c::cancel)
-                SmallButton(if(terminalOpen) "收起终端" else "展开终端") {terminalOpen=!terminalOpen}
+                if(c.pty!=null && c.busy)SmallButton("关闭交互终端") {c.closePty()}
+                if(c.pty!=null && !c.busy)SmallButton("命令执行") {c.showCommands()}
+                SmallButton(if(c.pty==null) "打开交互终端" else "重新打开终端",idle&&c.connected&&c.capabilities?.pty==true) {terminalOpen=true;c.openPty()}
+                SmallButton(if(terminalOpen) "收起终端" else "展开终端",c.pty==null || !c.busy) {terminalOpen=!terminalOpen}
             }
-            if(terminalOpen) Terminal(c.terminal,Modifier.weight(1f).fillMaxWidth(),idle,c::clearTerminal,{choose(true,"hdtools-terminal.log",c::export)}) {
+            if(terminalOpen && c.pty!=null) key(c.pty) {InteractiveTerminal(c.pty!!,Modifier.weight(1f).fillMaxWidth())}
+            if(terminalOpen && c.pty==null) Terminal(c.terminal,Modifier.weight(1f).fillMaxWidth(),idle,c::clearTerminal,{choose(true,"hdtools-terminal.log",c::export)}) {
                 Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                     Field("命令",input,{input=it},Modifier.weight(1f),idle&&c.connected)
                     SmallButton("执行",idle&&c.connected&&input.isNotBlank()) {val value=input;input="";c.execute(value)}

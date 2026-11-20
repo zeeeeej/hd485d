@@ -1,16 +1,18 @@
-# HD485 0.2.1
+# HD485 0.3.0
 
-板卡环境、PTY 基线及后续测量要求见 [BOARD_PTY.md](BOARD_PTY.md)。
+架构图、状态图与数据流见 [ARCHITECTURE.md](ARCHITECTURE.md)；板卡环境、文件大小与内存实测见 [BOARD_PTY.md](BOARD_PTY.md)。
 
 单 RS485 通道的用户态共享服务。包含 C 服务 `hd485d`、C SDK、Python 主机工具和业务示例；原有业务字节不封装，应用通过 SDK 申请唯一控制权，其他应用可以订阅原始接收流。
 
 ## 当前状态
 
+0.3.0 增加可选交互 PTY（`--allow-shell --allow-pty`，方式一），HDTools 0.2.0 增加真正的终端视图。已交叉构建并在 RV1106、Anyka 两板部署；xpl 于 2026-11-20 确认验证完毕。交互实测和资源数据见 BOARD_PTY.md，验证范围及限制见 [VALIDATION.md](VALIDATION.md)。下述 0.2.1 为历史记录。
+
 0.2.1 修复终端 cd：同一维护会话保留工作目录和 OLDPWD，HDTools 0.1.3 根据服务能力显示提示。新会话重置目录，文件浏览根目录和业务串口行为保持兼容。
 
 新增 [HDTools 桌面应用](HDTools/README.md)，支持 macOS／Windows、整个配置文件系统的目录浏览、二进制上传下载及命令终端。板端 0.2.0 增加独立的 `--fs-root`；旧 CLI、SDK 与 `--root` 行为保持兼容。
 
-**2026-11-19 已部署 0.2.1，方式一，启用 `--allow-shell --fs-root /`。同一真实 HDTools 会话内 cd／pwd、相对目录、cd -、重连重置均通过；此前文件传输与业务抢占验证见记录。0.2.0、0.1.1 目录保留用于回退。当前状态见 [部署交接](DEPLOYMENT.md)。**
+**历史记录：2026-11-19 部署 0.2.1，方式一，启用 `--allow-shell --fs-root /`。同一真实 HDTools 会话内 cd／pwd、相对目录、cd -、重连重置均通过；此前文件传输与业务抢占验证见记录。0.2.0、0.1.1 目录保留用于回退。当前状态见 [部署交接](DEPLOYMENT.md)。**
 
 以下 0.1.1 内容为此前实板验证记录。
 
@@ -147,3 +149,12 @@ python3 tools/hd485ctl.py --port /dev/cu.usbserial-FTAP6OK03 get input.bin ./dow
 ## 后续集成边界
 
 当前 `camera_app` 仍直接操作串口与 GPIO，不能与 `hd485d` 同时运行。接入真实业务时需将其 UART 层改成 SDK 客户端，保留原始协议解析，移除该客户端的物理 UART／DE 操作，再验证方式二维护帧的兼容性。该变更位于外部工作区，本次未执行。
+
+## Anyka 构建与 PTY 启动
+
+使用 `tools/build-anyka-docker.sh`，参数为 `HD485_CONTAINER` 和 Anycloud 的
+`CROSS_COMPILE`。脚本自动为 GCC 5.5 设置工具链自己的宿主库搜索路径，输出
+`dist/hd485-anyka-0.3.0.tar`。板端先正常停止原 UART 所有者并确认看门狗关闭，
+从解包的 anyka 目录运行 `sh tools/run-anyka.sh --fs-root / --allow-shell --allow-pty`。
+当前配置为 ttySAK2 / 460800 / GPIO5，具体后台启动、回退及资源数据见
+[DEPLOYMENT.md](DEPLOYMENT.md)、[BOARD_PTY.md](BOARD_PTY.md)。

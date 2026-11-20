@@ -1,13 +1,16 @@
-# HDTools 0.1.3
+# HDTools 0.2.0
 
 通过唯一的 485 通道浏览设备文件、上传下载、执行命令的桌面应用。界面参考 CamDock
 “设备文件”，连接使用 H485 维护协议；macOS / Windows 使用同一套 Compose Desktop 界面。
 
+xpl 于 2026-11-20 确认本轮验证完毕；双板交互终端及读模式取消测试见
+[VALIDATION.md](../VALIDATION.md)。
+
 ## 启动
 
 Mac 已构建的应用位于 `build/compose/binaries/main/app/HDTools.app`，安装包位于
-`build/compose/binaries/main/dmg/HDTools-1.1.3.dmg`。应用版本为 0.1.3；Mac 安装包因
-Compose/macOS 主版本必须大于零，采用 1.1.3 映射。
+`build/compose/binaries/main/dmg/HDTools-1.2.0.dmg`。应用版本为 0.2.0；Mac 安装包因
+Compose/macOS 主版本必须大于零，采用 1.2.0 映射。
 
 也可以用 JDK 17 从本目录运行：
 
@@ -56,7 +59,7 @@ sh tools/run-rv1106.sh --allow-shell --fs-root /
 - 中断上传的板端临时文件是目标目录内 `.hd485-*.part/.meta`；文件列表隐藏它们。
   不同内容上传同一名字可能提示断点冲突；通过终端 `ls -a` 核对后，由操作者决定清理。
 - 终端输入 `@version`、`ls -al /userdata`、`cat /proc/version` 等命令，点击执行。
-  取消按钮发送 CANCEL，显示输出与退出码。没有 PTY，不支持 vi/top 等交互应用；
+  取消按钮发送 CANCEL，显示输出与退出码。此命令执行视图不支持交互输入；vi/top 请使用新版交互终端；
   连接 0.2.1+ 时，同一连接内 `cd` 会改变下一条命令的工作目录，支持 `cd -`；
   文件浏览路径独立。重连重置目录；环境变量、alias 和函数仍不跨命令保留。
 - 输出仅保留当前窗口最近 256 Ki 字符，可搜索、复制、自动跟随、清空、导出 UTF-8 日志。
@@ -126,3 +129,18 @@ pwd
 第二条输出 `/userdata`。支持相对目录和 `cd -`。设备目录列表不会随 Shell 的 cd 自动跳转。
 取消或超时终止命令不更新目录；取消本地读取不等于取消板端命令，结果未知时应先用 pwd 核对。
 旧版服务会显示“独立命令 · 不保留目录”，不会把新功能错误地宣称为可用。
+
+## 0.2.0 交互终端
+
+板端 hd485d 0.3.0 使用 `--allow-shell --allow-pty --mode idle` 启动后，连接栏可打开
+“交互终端”。该视图支持 vi、top、Tab、方向键、Esc、Ctrl+C/D、复制粘贴和窗口尺寸同步。
+使用 JediTerm 3.72，通过 Compose SwingPanel 显示；实际键盘数据仍走 H485 轮询协议，
+不连接 SSH、不启动主机 Shell。保留“命令执行”作为旧板端及非交互操作入口。
+
+等待应答时按键在本地排队，物理串口禁止写；输入队列上限 4 KiB，大段粘贴需分段。
+交互期间暂停文件和普通命令操作。关闭按钮结束板端 Shell；重新打开创建新会话。
+“取消读取”停止当前等待和所有后续自动写，结果未知，板端默认 20 秒无请求后回收。
+业务抢占同样结束交互会话，未保存的 vi 内容可能丢失；不自动恢复或重新执行。
+
+Mac 包 `HDTools-1.2.0.dmg`；Windows 未实机验收。板卡、资源与部署见
+[BOARD_PTY.md](../BOARD_PTY.md)。JediTerm 第三方声明见 THIRD_PARTY.md。

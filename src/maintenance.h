@@ -15,6 +15,9 @@ typedef struct {
     void *context;
 } maint_command;
 typedef struct {
+    struct pty_session *pty;
+    int allow_pty, pty_timeout_ms;
+    uint32_t pty_sequence;
     int root, allow_shell, timeout_ms;
     pid_t pid, pgid;
     int pipes[2], cmd_state, exitcode, truncated;
@@ -46,6 +49,12 @@ typedef struct {
     unsigned command_count;
 } maintenance;
 int maint_init(maintenance *m, const char *root, int allow_shell, int timeout_ms);
+int maint_pty_busy(maintenance *m);
+void maint_pty_tick(maintenance *m);
+void maint_pty_stop(maintenance *m, int reason);
+void maint_pty_destroy(maintenance *m);
+int maint_pty_request(maintenance *m, unsigned op, const unsigned char *data, size_t n,
+                      unsigned char *out, size_t *len);
 int maint_cwd_init(maintenance *m);
 int maint_cwd_enter(maintenance *m);
 void maint_cwd_reset(maintenance *m);

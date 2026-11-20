@@ -219,18 +219,32 @@ class Host:
 
 def open_serial(path, baud):
     fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    exclusive = False
     try:
         import fcntl
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         fcntl.ioctl(fd, termios.TIOCEXCL)
+        exclusive = True
         attrs = termios.tcgetattr(fd)
         attrs[0] = attrs[1] = attrs[3] = 0
         attrs[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
-        attrs[4] = attrs[5] = getattr(termios, f'B{baud}')
+        speed = getattr(termios, f'B{baud}', None)
+        custom = speed is None and sys.platform == 'darwin' and baud in (460800, 921600)
+        if speed is None and not custom:
+            raise ValueError(f'unsupported baud rate: {baud}')
+        attrs[4] = attrs[5] = termios.B115200 if custom else speed
         attrs[6][termios.VMIN] = attrs[6][termios.VTIME] = 0
         termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        if custom:
+            # Apple IOKit/serial/ioss.h: _IOW('T', 2, speed_t), 64-bit speed_t.
+            fcntl.ioctl(fd, 0x80085402, struct.pack('=Q', baud))
         return fd
     except BaseException:
+        try:
+            if exclusive:
+                fcntl.ioctl(fd, termios.TIOCNXCL)
+        except OSError:
+            pass
         os.close(fd)
         raise
 
