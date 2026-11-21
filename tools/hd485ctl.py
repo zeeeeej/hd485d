@@ -57,12 +57,17 @@ class Parser:
 
 
 class Host:
-    def __init__(self, fd, address=1, timeout=0.8, retries=3):
+    def __init__(self, fd, address=1, timeout=0.8, retries=3, turnaround_ms=0):
         self.fd, self.address, self.timeout, self.retries = fd, address, timeout, retries
         self.session, self.request = 0, 0
         self.parser = Parser()
+        if turnaround_ms < 0:
+            raise ValueError("turnaround must be nonnegative")
+        self.turnaround = turnaround_ms / 1000
+        self.next_write = 0
 
     def _write(self, data):
+        time.sleep(max(0, self.next_write - time.monotonic()))
         end = time.monotonic() + self.timeout
         view = memoryview(data)
         while view:
@@ -102,6 +107,7 @@ class Host:
                         continue
                     if len(body) < 4:
                         raise ValueError('short response')
+                    self.next_write = time.monotonic() + self.turnaround
                     status, = struct.unpack_from('<I', body)
                     if status:
                         raise OSError(status, f'device error {status}')
@@ -255,6 +261,7 @@ def main():
     parser.add_argument('--baud', type=int, default=230400)
     parser.add_argument('--address', type=int, default=1)
     parser.add_argument('--timeout', type=float, default=0.8)
+    parser.add_argument('--turnaround-ms', type=float, default=60, help='RX to TX guard, matching HDTools (default 60ms)')
     sub = parser.add_subparsers(dest='action', required=True)
     sub.add_parser('status')
     sub.add_parser('cancel')
@@ -266,10 +273,10 @@ def main():
         cmd.add_argument('destination')
         cmd.add_argument('--overwrite', action='store_true')
     args = parser.parse_args()
-    if not 1 <= args.address <= 65535 or args.timeout <= 0:
-        parser.error('invalid address or timeout')
+    if not 1 <= args.address <= 65535 or args.timeout <= 0 or args.turnaround_ms < 0:
+        parser.error('invalid address, timeout or turnaround')
     fd = open_serial(args.port, args.baud)
-    host = Host(fd, args.address, args.timeout)
+    host = Host(fd, args.address, args.timeout, turnaround_ms=args.turnaround_ms)
     try:
         host.hello()
         if args.action == 'status':

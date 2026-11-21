@@ -104,6 +104,8 @@ class Integration(unittest.TestCase):
             kind = socket.SOCK_SEQPACKET if sys.platform.startswith('linux') else socket.SOCK_STREAM
             self.pairs = [socket.socketpair(socket.AF_UNIX,kind) for _ in range(16)]
             extra = ['--test-client-fds', ','.join(str(b.fileno()) for a,b in self.pairs)]
+        if 'pepsi_' in self._testMethodName:
+            extra += ['--rx-profile','pepsi']
         if 'qjy_' in self._testMethodName:
             extra += ['--rx-profile','qjy']
         if 'fs_' in self._testMethodName:
@@ -415,7 +417,7 @@ class Integration(unittest.TestCase):
         self.assertEqual((rc,out.getvalue(),err.getvalue()),(7,b'hello',b'error'))
         out,err=io.BytesIO(),io.BytesIO()
         self.assertEqual(self.host.execute('@version',out,err),0)
-        self.assertEqual(out.getvalue(),b'hd485d 0.4.1\n')
+        self.assertEqual(out.getvalue(),b'hd485d 0.4.2\n')
 
     def test_shell_timeout_and_output_cap(self):
         self.host.hello();self.host.call(EXEC,b'sleep 5')
@@ -609,6 +611,40 @@ class Integration(unittest.TestCase):
         a=self.client();a.call(3);self.serial_write(b'H48')
         self.assertEqual(a.received(3),b'H48')
         self.serial_write(b'plain');self.assertEqual(a.received(5),b'plain')
+
+    def test_host_half_duplex_turnaround(self):
+        host = Host(self.master, timeout=.35, retries=2, turnaround_ms=40)
+        host.hello()
+        at = time.monotonic()
+        with self.assertRaises(OSError):
+            host.call(0x7f)
+        self.assertGreaterEqual(time.monotonic()-at, .035)
+        at = time.monotonic()
+        host.call(STATUS)
+        self.assertGreaterEqual(time.monotonic()-at, .035)
+
+    def test_pepsi_payload_and_recovery(self):
+        client = self.client()
+        self.assertEqual(struct.unpack('<I', client.call(9))[0] & 16, 16)
+        client.call(3)
+        maintenance = frame(b'H485', STATUS, 1, 0, 81, b'')
+        payload = maintenance + b'x' * (64 - len(maintenance))
+        header = struct.pack('>BBHHHHH', 1, 0x17, 0, 4000, 255, 32, 64)
+        packet = header + payload + b'cc'
+        # Every header split, plus business/maintenance concatenation.
+        for split in range(1, 13):
+            os.write(self.master, packet[:split])
+            time.sleep(.005)
+            os.write(self.master, packet[split:])
+            self.assertEqual(client.received(len(packet)), packet)
+        os.write(self.master, maintenance + packet + maintenance)
+        self.assertEqual(client.received(len(packet)), packet)
+        # Truncation must not indefinitely swallow later maintenance.
+        os.write(self.master, header + b'ab')
+        self.assertEqual(client.received(14), header + b'ab')
+        time.sleep(1.2)
+        os.write(self.master, maintenance + packet)
+        self.assertEqual(client.received(len(packet)), packet)
 
     def test_qjy_payload_and_raw_lease(self):
         a,b=self.client(),self.client();a.call(3);b.call(3)

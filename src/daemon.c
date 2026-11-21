@@ -389,7 +389,7 @@ static void ipc_request(server *s, int i, const unsigned char *f) {
     }
     case CAPABILITIES:
         if(n)err=EINVAL;
-        else {wr32(out,11u | (s->filter.qjy?4u:0u));len=4;}
+        else {wr32(out,11u | (s->filter.qjy?4u:0u) | (s->filter.pepsi?16u:0u));len=4;}
         break;
     case RX_RAW_BEGIN:
     case RX_RAW_END:
@@ -693,14 +693,14 @@ static void usage(void) {
     fprintf(stderr, "hd485d --device PATH --socket PATH --root DIR [--baud 230400] [--mode "
                     "idle|coexist] [--de none|gpio|gpio-anyka|kernel] [--gpio 35] [--address 1] "
                     "[--response-ms 500] [--allow-shell] [--command-timeout-ms 30000] "
-                    "[--rx-profile generic|qjy] [--lock-dir /run] [--fs-root DIR] [--allow-pty] [--pty-timeout-ms 20000]\n");
+                    "[--rx-profile generic|qjy|pepsi] [--lock-dir /run] [--fs-root DIR] [--allow-pty] [--pty-timeout-ms 20000]\n");
 }
 static int version_command(const char *args, unsigned char *out, size_t capacity, size_t *length,
                            void *context) {
     (void)context;
     if (*args)
         return 2;
-    const char *text = "hd485d 0.4.1\n";
+    const char *text = "hd485d 0.4.2\n";
     *length = strlen(text);
     if (*length > capacity)
         return 1;
@@ -744,8 +744,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(k, "--fs-root"))
             fsroot = v;
         else if (!strcmp(k, "--rx-profile")) {
-            if(strcmp(v,"generic") && strcmp(v,"qjy")){usage();free(s);return 2;}
+            if(strcmp(v,"generic") && strcmp(v,"qjy") && strcmp(v,"pepsi")){usage();free(s);return 2;}
             s->filter.qjy=!strcmp(v,"qjy");
+            s->filter.pepsi=!strcmp(v,"pepsi");
         }
         else if (!strcmp(k, "--de"))
             backend = v;
@@ -849,7 +850,7 @@ int main(int argc, char **argv) {
             goto fail;
         }
     }
-    fprintf(stderr, "hd485d 0.4.1: %s %u 8N1, mode=%s, de=%s, socket=%s\n", device, s->idle.baud,
+    fprintf(stderr, "hd485d 0.4.2: %s %u 8N1, mode=%s, de=%s, socket=%s\n", device, s->idle.baud,
             s->coexist ? "coexist" : "idle", backend, sock);
     while (!quitting) {
         struct pollfd p[CLIENTS + 3];

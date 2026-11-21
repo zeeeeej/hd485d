@@ -17,5 +17,5 @@ cp "$HD485_SOURCE/tools/run-rv1106.sh" "$HD485_SOURCE/tools/hd485ctl.py" "$HD485
 cp "$HD485_SOURCE/README.md" "$HD485_SOURCE/PROTOCOL.md" "$HD485_SOURCE/BOARD_PTY.md" "$HD485_SOURCE/DEPLOYMENT.md" "$HD485_SOURCE/TX_OPTIMIZATION.md" "$HD485_STAGE/"
 "${CROSS_COMPILE}readelf" -h "$HD485_STAGE/bin/hd485d"
 "${CROSS_COMPILE}readelf" -l "$HD485_STAGE/bin/hd485d"
-tar -cf "$HD485_SOURCE/dist/hd485-rv1106-0.4.1.tar" -C "$HD485_SOURCE/dist" rv1106
-(cd "$HD485_SOURCE/dist" && sha256sum hd485-rv1106-0.4.1.tar > hd485-rv1106-0.4.1.tar.sha256)
+tar -cf "$HD485_SOURCE/dist/hd485-rv1106-0.4.2.tar" -C "$HD485_SOURCE/dist" rv1106
+(cd "$HD485_SOURCE/dist" && sha256sum hd485-rv1106-0.4.2.tar > hd485-rv1106-0.4.2.tar.sha256)

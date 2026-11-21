@@ -26,6 +26,16 @@ static void parse(rx_filter *f) {
                 size_t n=HD_HEAD+rd32(f->pending+16);
                 flush(f);f->on_maintenance(f->context,f->pending,n);consume(f,n);continue;
             }
+        } else if(f->pepsi && f->pending[0]>=1 && f->pending[0]<=247 &&
+                  (f->used<2 || f->pending[1]==0x17)) {
+            if(f->used<12)return;
+            unsigned n=((unsigned)f->pending[10]<<8)|f->pending[11];
+            unsigned words=((unsigned)f->pending[8]<<8)|f->pending[9];
+            if(n>=8 && n<=6144 && !(n&1) && words==n/2) {
+                /* Protect the entire request, including CRC. Validation and
+                 * addressing remain the application's responsibility. */
+                business(f,f->pending,12);consume(f,12);f->frame_left=n+2;return;
+            }
         } else if(f->qjy && !memcmp(f->pending,qjy,f->used<2?f->used:2)) {
             if(f->used<8)return;
             uint32_t n=rd32(f->pending+4);
@@ -51,7 +61,16 @@ void rx_filter_feed(rx_filter *f,const unsigned char *p,size_t n) {
     flush(f);
 }
 void rx_filter_tick(rx_filter *f,int64_t timeout_ms) {
-    if(now_ms()-f->last<timeout_ms)return;
+    int64_t idle=now_ms()-f->last;
+    /* Pepsi's receiver discards incomplete requests after one second. Do not
+     * let a truncated request suppress maintenance indefinitely. */
+    if(f->pepsi && idle>=1000) {
+        f->frame_left=0;
+        if(f->used && memcmp(f->pending,"H485",f->used<4?f->used:4)) {
+            business(f,f->pending,f->used);f->used=0;flush(f);
+        }
+    }
+    if(idle<timeout_ms)return;
     if(f->used) {business(f,f->pending,f->used);f->used=0;flush(f);}
     /* A recognized QJY payload is length-delimited, like the original business
      * parser. Do not reinterpret its bytes after an arbitrary idle gap. */

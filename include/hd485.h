@@ -39,7 +39,7 @@ int hd485_tx_begin(hd485 *h, uint32_t total, uint32_t *ticket);
 int hd485_tx_data(hd485 *h, const void *data, size_t length);
 int hd485_tx_abort(hd485 *h);
 ssize_t hd485_read(hd485 *h, void *data, size_t capacity, uint32_t *sequence, uint32_t *epoch);
-enum { HD485_CAP_FILTERED_RX = 1, HD485_CAP_RAW_RX = 2, HD485_CAP_QJY_RX = 4, HD485_CAP_STREAM_TX = 8 };
+enum { HD485_CAP_FILTERED_RX = 1, HD485_CAP_RAW_RX = 2, HD485_CAP_QJY_RX = 4, HD485_CAP_STREAM_TX = 8, HD485_CAP_PEPSI_RX = 16 };
 int hd485_get_capabilities(hd485 *h, uint32_t *flags);
 /* Owner only. Declare the exact upcoming OTA byte count before sending its ACK.
  * Auto ends at count; explicit end aborts, as do release and disconnect. */

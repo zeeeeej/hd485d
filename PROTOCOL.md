@@ -222,7 +222,7 @@ EOF/退出信息与终端提示符无关，不通过识别 Shell 文本决定会
 不完整候选最多缓存 HD_PACKET 字节，空闲超时为 `2000 + HD_PACKET*12000/baud` ms；
 CRC 错误、非法头或超时未确认字节按顺序作为普通数据输出。接收序号现在按业务输出块递增。
 
-`--rx-profile generic|qjy`：默认 generic；RV1106 配套脚本选择 qjy。
+`--rx-profile generic|qjy|pepsi`：默认 generic；RV1106 配套脚本选择 qjy。
 qjy 识别 AA 5A 和 8 字节业务头，长度不超过 512 KiB 时，保护后续 payload+CRC16：
 流式转发、不检查其中 H485、不缓冲整帧，业务 CRC 由原业务解析器验证。
 已确认长度的业务载荷不会因任意空闲间隔被重新解释；这与原业务解析器的长度语义一致。
@@ -255,3 +255,11 @@ BEGIN 必须由 owner 在无 TX 时调用，声明包含业务头、载荷、CRC
 GPIO 后端整帧只置高 DE 一次，只在最终 tcdrain 和原有 guard 后置低 DE、发送一次 TX_DONE。不同 DATA 间不做 drain/换向。生产消费、完成通知使用条件变量和非阻塞通知管道，不使用忙轮询；daemon 原有维护定时 tick 保留，发送完成无需等 tick。硬件/kernel 后端方向行为由其驱动决定。
 
 设置 `HD485_TX_TRACE=1` 可在 daemon/业务进程日志记录单调时钟微秒、ticket、长度和阶段，不记录业务载荷。阶段含 ipc_write/ipc_begin、submit、worker_start、write、drain_begin/end、ready、tx_done；App 另记录 request/accepted/done。默认关闭，性能正式复测关闭，计时定位另开独立运行。
+
+## 0.4.2 百事请求保护
+
+`--rx-profile pepsi` 增加 `HD485_CAP_PEPSI_RX=16`（bit 4）；该配置能力集合为27，generic仍为11，qjy仍为15。旧操作编号和流式发送协议不变。
+
+百事请求地址1～247、功能码0x17、12字节头；大端数据长度位于10～11，范围8～6144且为偶数，8～9字节字数应等于长度的一半。识别后按长度原样转发整个数据区及两字节CRC，不再扫描内部维护标记；CRC、消息结构及本机地址由业务App校验。仅保存剩余长度，不分配整帧缓存。1秒无新数据后放弃百事残帧保护，与PepsiApp残帧超时一致；维护帧自身的超时仍沿用原规则。
+
+有效维护帧不会发给业务订阅者。共享App启动必须确认 FILTERED_RX、PEPSI_RX、STREAM_TX 和230400/8N1，不能连接generic或qjy配置后静默运行。发送成功以匹配ticket的TX_DONE为准。

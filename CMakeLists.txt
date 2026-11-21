@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(hd485 VERSION 0.4.1 LANGUAGES C)
+project(hd485 VERSION 0.4.2 LANGUAGES C)
 set(CMAKE_C_STANDARD 11)
 add_compile_definitions(_GNU_SOURCE)
 add_compile_options(-Wall -Wextra -Wpedantic)

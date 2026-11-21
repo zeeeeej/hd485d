@@ -6,7 +6,7 @@ typedef struct {
     unsigned char pending[HD_PACKET], business[4096];
     size_t used, business_used;
     uint64_t frame_left, raw_left;
-    int qjy;
+    int qjy, pepsi;
     int64_t last;
     rx_sink on_business, on_maintenance;
     void *context;
