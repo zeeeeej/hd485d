@@ -216,6 +216,7 @@ static void ipc_request(server *s, int i, const unsigned char *f) {
     }
     switch (op) {
     case ACQUIRE:
+        tx_trace(s->serial.trace,"ipc_acquire",id,n);
         if (n != 4) {
             err = EINVAL;
             break;
@@ -243,6 +244,7 @@ static void ipc_request(server *s, int i, const unsigned char *f) {
             preempt(s);
         return;
     case RELEASE:
+        tx_trace(s->serial.trace,"ipc_release",id,n);
         if (n) {
             err = EINVAL;
             break;
@@ -576,6 +578,7 @@ static void filtered_maintenance(void *context,const unsigned char *p,size_t n) 
 }
 static void filtered_business(void *context,const unsigned char *p,size_t n) {
     server *s=context;
+    tx_trace(s->serial.trace,"business_rx",0,n);
     unsigned char b[HD_PACKET],d[4104];
     wr32(d,++s->rxseq);wr32(d+4,s->epoch);memcpy(d+8,p,n);
     size_t len=frame_make(b,"I485",RX,0,0,0,d,n+8);
@@ -625,6 +628,7 @@ static void progress(server *s) {
                 err = errno;
             if (c->fd >= 0 && c->release_pending)
                 response(s, s->owner, RELEASE, c->release_id, err, NULL, 0);
+            tx_trace(s->serial.trace,"owner_released",c->release_id,(size_t)err);
             c->release_pending = 0;
             s->owner = -1;
             reset_remote(s);
@@ -655,6 +659,7 @@ static void progress(server *s) {
         c->release_pending = 0;
         preempt(s);
         response(s, best, ACQUIRE, c->wait_id, 0, NULL, 0);
+        tx_trace(s->serial.trace,"owner_granted",c->wait_id,0);
         c->wait_id = 0;
         c->ticket = 0;
         ++s->epoch;

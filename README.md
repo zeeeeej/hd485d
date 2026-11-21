@@ -2,6 +2,8 @@
 
 0.4.2 新增 Anyka PepsiApp 接入所需的 `pepsi` 接收保护及能力位；联合部署与实测结果见 [Anyka 部署说明](Anyka_PepsiApp_hd485d部署.md)，同一App的直连/共享比较见 [Anyka hd485d 对比](Anyka_hd485d对比.md)。
 
+Anyka发送前等待与小应答IPC优化的实测、短帧限制及当前板端状态见[Anyka TX优化验证](Anyka_TX优化验证.md)。
+
 架构图、状态图与数据流见 [ARCHITECTURE.md](ARCHITECTURE.md)；板卡环境、文件大小与内存实测见 [BOARD_PTY.md](BOARD_PTY.md)。
 
 单 RS485 通道的用户态共享服务。包含 C 服务 `hd485d`、C SDK、Python 主机工具和业务示例；原有业务字节不封装，应用通过 SDK 申请唯一控制权，其他应用可以订阅过滤维护帧后的业务接收流。

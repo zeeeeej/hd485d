@@ -121,6 +121,31 @@ static int restore_priority(serial_port *s) {
     if(!e)s->tx_priority_changed=0;
     return e;
 }
+static int de_setup(serial_port *s) {
+    struct timespec before, after;
+    if ((s->trace || s->backend==3) && clock_gettime(CLOCK_MONOTONIC,&before))
+        return errno;
+    if (s->backend==3) {
+        /* Anyka rounds usleep(100) up to about 10 ms. Keep the electrical
+         * setup guard, but bound active waiting to 100 us per transmission.
+         * Never use this for UART drain, producer credit or the event loop. */
+        int64_t elapsed;
+        do {
+            if (clock_gettime(CLOCK_MONOTONIC,&after)) return errno;
+            elapsed=(int64_t)(after.tv_sec-before.tv_sec)*1000000000 +
+                    after.tv_nsec-before.tv_nsec;
+        } while (elapsed<100000);
+    } else {
+        usleep(100);
+    }
+    if (s->trace) {
+        if (clock_gettime(CLOCK_MONOTONIC,&after)) return errno;
+        int64_t elapsed=(int64_t)(after.tv_sec-before.tv_sec)*1000000 +
+                        (after.tv_nsec-before.tv_nsec)/1000;
+        tx_trace(1,"de_setup_us",s->ticket,(size_t)elapsed);
+    }
+    return 0;
+}
 static int anyka_drain(serial_port *s) {
 #ifdef __linux__
     int64_t end=now_ms()+5000;
@@ -175,8 +200,8 @@ static void *worker(void *v) {
         }
         if (!err && de(s, 1))
             err = errno;
-        else if (s->gpio_fd >= 0)
-            usleep(100);
+        else if (!err && s->gpio_fd >= 0)
+            err=de_setup(s);
         size_t off = 0;
         unsigned char chunk[HD_MAX];
         int64_t deadline = now_ms() + 2000 + (int64_t)len * 12000 / s->config.baud;
