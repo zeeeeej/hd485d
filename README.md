@@ -1,4 +1,6 @@
-# HD485 0.4.2
+# HD485 0.4.3
+
+0.4.3：RV1106的GPIO发送前等待与Anyka统一，保留100微秒硬件稳定时间；发送后5ms保护保持原样。实测与部署状态见[RV1106发送等待实测](RV1106_发送等待实测.md)。
 
 0.4.2 新增 Anyka PepsiApp 接入所需的 `pepsi` 接收保护及能力位；联合部署与实测结果见 [Anyka 部署说明](Anyka_PepsiApp_hd485d部署.md)，同一App的直连/共享比较见 [Anyka hd485d 对比](Anyka_hd485d对比.md)。
 
@@ -78,7 +80,7 @@ export CROSS_COMPILE=/实际工具链/bin/arm-rockchip830-linux-uclibcgnueabihf-
 sh tools/build-rv1106.sh
 ```
 
-脚本在本工作区生成 `dist/hd485-rv1106-0.4.2.tar` 及 SHA-256 校验文件，不执行部署。包中包含服务、示例、SDK 静态库和头文件、配置与运行脚本。包使用普通 tar，不依赖板端 gzip。
+脚本在本工作区生成 `dist/hd485-rv1106-0.4.3.tar` 及 SHA-256 校验文件，不执行部署。包中包含服务、示例、SDK 静态库和头文件、配置与运行脚本。包使用普通 tar，不依赖板端 gzip。
 
 在 Mac 上复用 `camera_app` 的现有 Docker 环境时，可使用隔离快照入口，无需把本工作区挂载到容器，也不会覆盖容器中的另一份 camera_app：
 

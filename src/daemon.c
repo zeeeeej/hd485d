@@ -705,7 +705,7 @@ static int version_command(const char *args, unsigned char *out, size_t capacity
     (void)context;
     if (*args)
         return 2;
-    const char *text = "hd485d 0.4.2\n";
+    const char *text = "hd485d 0.4.3\n";
     *length = strlen(text);
     if (*length > capacity)
         return 1;
@@ -855,7 +855,7 @@ int main(int argc, char **argv) {
             goto fail;
         }
     }
-    fprintf(stderr, "hd485d 0.4.2: %s %u 8N1, mode=%s, de=%s, socket=%s\n", device, s->idle.baud,
+    fprintf(stderr, "hd485d 0.4.3: %s %u 8N1, mode=%s, de=%s, socket=%s\n", device, s->idle.baud,
             s->coexist ? "coexist" : "idle", backend, sock);
     while (!quitting) {
         struct pollfd p[CLIENTS + 3];

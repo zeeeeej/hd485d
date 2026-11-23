@@ -417,7 +417,7 @@ class Integration(unittest.TestCase):
         self.assertEqual((rc,out.getvalue(),err.getvalue()),(7,b'hello',b'error'))
         out,err=io.BytesIO(),io.BytesIO()
         self.assertEqual(self.host.execute('@version',out,err),0)
-        self.assertEqual(out.getvalue(),b'hd485d 0.4.2\n')
+        self.assertEqual(out.getvalue(),b'hd485d 0.4.3\n')
 
     def test_shell_timeout_and_output_cap(self):
         self.host.hello();self.host.call(EXEC,b'sleep 5')

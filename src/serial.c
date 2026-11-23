@@ -123,21 +123,18 @@ static int restore_priority(serial_port *s) {
 }
 static int de_setup(serial_port *s) {
     struct timespec before, after;
-    if ((s->trace || s->backend==3) && clock_gettime(CLOCK_MONOTONIC,&before))
+    if (clock_gettime(CLOCK_MONOTONIC,&before))
         return errno;
-    if (s->backend==3) {
-        /* Anyka rounds usleep(100) up to about 10 ms. Keep the electrical
-         * setup guard, but bound active waiting to 100 us per transmission.
-         * Never use this for UART drain, producer credit or the event loop. */
-        int64_t elapsed;
-        do {
-            if (clock_gettime(CLOCK_MONOTONIC,&after)) return errno;
-            elapsed=(int64_t)(after.tv_sec-before.tv_sec)*1000000000 +
-                    after.tv_nsec-before.tv_nsec;
-        } while (elapsed<100000);
-    } else {
-        usleep(100);
-    }
+    /* RV1106 and Anyka can round usleep(100) up to a scheduler tick.
+     * Both userspace GPIO backends retain the same 100 us setup guard.
+     * Never extend this short active wait to UART drain, the 5 ms GPIO
+     * post-send guard, producer credit or the event loop. */
+    int64_t elapsed;
+    do {
+        if (clock_gettime(CLOCK_MONOTONIC,&after)) return errno;
+        elapsed=(int64_t)(after.tv_sec-before.tv_sec)*1000000000 +
+                after.tv_nsec-before.tv_nsec;
+    } while (elapsed<100000);
     if (s->trace) {
         if (clock_gettime(CLOCK_MONOTONIC,&after)) return errno;
         int64_t elapsed=(int64_t)(after.tv_sec-before.tv_sec)*1000000 +

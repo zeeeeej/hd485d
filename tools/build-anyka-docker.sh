@@ -53,6 +53,6 @@ fi
 mkdir -p "$HD485_SOURCE/dist"
 docker cp "$HD485_CONTAINER:$HD485_CONTAINER_TASK/dist/." "$HD485_SOURCE/dist/"
 cp "$HD485_HOST_TASK/build.log" "$HD485_SOURCE/dist/build-anyka.log"
-(cd "$HD485_SOURCE/dist" && shasum -a 256 -c hd485-anyka-0.4.2.tar.sha256)
-printf 'Package: %s/dist/hd485-anyka-0.4.2.tar\n' "$HD485_SOURCE"
+(cd "$HD485_SOURCE/dist" && shasum -a 256 -c hd485-anyka-0.4.3.tar.sha256)
+printf 'Package: %s/dist/hd485-anyka-0.4.3.tar\n' "$HD485_SOURCE"
 # Retain exact source snapshot and build log; no automatic deletion of evidence.
