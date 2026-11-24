@@ -1,6 +1,20 @@
 # hd_camera_app2 + hd485d 部署（RV1106）
 
-> 2026-11-23补充：当前RV1106已单独升级并保留hd485d **0.4.3**，App仍为0.5.53.d、UART仍为1.0.27。发送前100us等待与Anyka统一，发送后5ms不变。[实测、摘要与回退](RV1106_发送等待实测.md)。下文原联合包仍包含0.4.1，历史包未覆盖；新的daemon普通tar为dist/hd485-rv1106-0.4.3.tar。
+> **新增 App 双向升级（0.4.54.d / 0.5.54.d）**：未安装 hd485d 的原始 0.4.51.d，先通过原 App 升级功能安装 0.4.54.d 过渡版，再安装包含 hd485d 0.4.3 的 0.5.54.d 配套包。新版可退回原始 0.4.51.d 包，再次升级仍须经过过渡版。0.1～0.4 前缀按直连版本识别，但拒绝历史 0.4.52/0.4.53 联调包；更早固件不因前缀匹配就视为已通过升级验收。
+>
+> App 源码及交付物在独立 worktree：`/Users/xiangpengle/Documents/tmp/luckfox/worktrees/hd485-camera-app/qjy-rv1106/camera_app/`，包位于 `dist/`，完整说明为 `deploy/HD485_APP_OTA.md`。2026-11-23 已完成原始旧包、过渡版、新版的完整实板往返，当前保留 App 0.5.54.d / UART 1.0.28 / hd485d 0.4.3；验证记录为该 worktree 下 `docs/records/HD485_STACK_OTA_20261123.md`。以下 0.5.53.d 内容保留为历史手动部署说明，不能把其普通 tar 当作新 App OTA 包。
+
+> 2026-11-23 前一轮记录：RV1106 单独升级 hd485d **0.4.3** 时，App 为 0.5.53.d、UART 为 1.0.27；当前状态以上述双向升级记录为准。发送前100us等待与Anyka统一，发送后5ms不变。[实测、摘要与回退](RV1106_发送等待实测.md)。下文原联合包仍包含0.4.1，历史包未覆盖；新的daemon普通tar为dist/hd485-rv1106-0.4.3.tar。
+
+## 2026-11-24 新设备 CamDock 验收
+
+xpl 在此前未安装过 hd485d 的另一台 RV1106 上，通过 CamDock 依次升级 `dynamic_app_0.4.54.d.tar.gz`、`dynamic_app_0.5.54.d.tar.gz`，并确认“验证完毕”。该路径不要求预先手工安装 daemon；过渡版安装兼容管理器，配套版安装 hd485d 0.4.3 和启动配置。
+
+本次设备 RS485 为 `/dev/cu.wchusbserial144420`，日志口为 `/dev/cu.wchusbserial1420`。这是 xpl 的实际操作与验收确认，Agent 本轮没有重新连接设备或重复刷机；升级前具体 App 版本及逐项测试输出未另行提供。原始 0.4.51.d 往返实测、其他历史版本的验证边界维持原记录。
+
+配套实现已归档在 camera_app 的 `feat/hd485-camera-app` 分支，提交 `b2bfaa4`。
+
+详细用户验收记录位于上述 camera_app worktree 的 `docs/records/HD485_CAMDOCK_FIRST_INSTALL_20261124.md`。后续设备仍按“过渡包 → 等待重启并确认业务恢复 → 配套包 → 检查版本、daemon 和业务”执行。
 
 ## 1. 版本和适用范围
 
